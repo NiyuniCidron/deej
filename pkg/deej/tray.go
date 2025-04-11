@@ -1,8 +1,8 @@
 package deej
 
 import (
-	"github.com/getlantern/systray"
-
+	//"github.com/getlantern/systray"
+	"fyne.io/systray"
 	"github.com/omriharel/deej/pkg/deej/icon"
 	"github.com/omriharel/deej/pkg/deej/util"
 )
