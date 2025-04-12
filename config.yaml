@@ -8,15 +8,17 @@
 # important: slider indexes start at 0, regardless of which analog pins you're using!
 slider_mapping:
   0: master
-  1: chrome.exe
-  2: spotify.exe
+  1: mic
+  2: 
+    - discord
+    - discordcanary
   3:
-    - pathofexile_x64.exe
-    - rocketleague.exe
-  4: discord.exe
+    - firefox
+    - plexamp
+  4: deej.unmapped
 
 # set this to true if you want the controls inverted (i.e. top is 0%, bottom is 100%)
-invert_sliders: false
+invert_sliders: true
 
 # settings for connecting to the arduino board
 com_port: /dev/ttyDEEJ
