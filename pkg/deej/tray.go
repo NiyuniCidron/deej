@@ -13,7 +13,13 @@ func (d *Deej) initializeTray(onDone func()) {
 	onReady := func() {
 		logger.Debug("Tray instance ready")
 
-		systray.SetTemplateIcon(icon.DeejLogo, icon.DeejLogo)
+		// Set the initial tray icon based on theme instead of hardcoded DeejLogo
+		switch theme {
+		case ThemeLight:
+			systray.SetIcon(icon.NormalLightIcon)
+		default:
+			systray.SetIcon(icon.NormalDarkIcon)
+		}
 		systray.SetTitle("deej")
 		systray.SetTooltip("deej")
 

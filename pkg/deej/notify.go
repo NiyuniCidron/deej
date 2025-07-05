@@ -34,18 +34,29 @@ func NewToastNotifier(logger *zap.SugaredLogger) (*ToastNotifier, error) {
 // Notify sends a toast notification (or falls back to other types of notification for older Windows versions)
 func (tn *ToastNotifier) Notify(title string, message string) {
 
-	// we need to unpack deej.ico somewhere to remain portable. we already have it as bytes so it should be fine
-	appIconPath := filepath.Join(os.TempDir(), "deej.ico")
+	// Detect system theme to use appropriate icon
+	theme := DetectSystemTheme()
+	var iconData []byte
+
+	switch theme {
+	case ThemeLight:
+		iconData = icon.NormalLightIcon
+	default:
+		iconData = icon.NormalDarkIcon
+	}
+
+	// we need to unpack the theme-appropriate icon somewhere to remain portable
+	appIconPath := filepath.Join(os.TempDir(), "deej-theme.ico")
 
 	if !util.FileExists(appIconPath) {
-		tn.logger.Debugw("Deej icon file missing, creating", "path", appIconPath)
+		tn.logger.Debugw("Deej theme icon file missing, creating", "path", appIconPath, "theme", theme)
 
 		f, err := os.Create(appIconPath)
 		if err != nil {
 			tn.logger.Errorw("Failed to create toast notification icon", "error", err)
 		}
 
-		if _, err = f.Write(icon.DeejLogo); err != nil {
+		if _, err = f.Write(iconData); err != nil {
 			tn.logger.Errorw("Failed to write toast notification icon", "error", err)
 		}
 
@@ -54,7 +65,7 @@ func (tn *ToastNotifier) Notify(title string, message string) {
 		}
 	}
 
-	tn.logger.Infow("Sending toast notification", "title", title, "message", message)
+	tn.logger.Infow("Sending toast notification", "title", title, "message", message, "theme", theme)
 
 	// send the actual notification
 	if err := beeep.Notify(title, message, appIconPath); err != nil {
