@@ -51,7 +51,7 @@ const (
 	// always preventing lookup of other processes bound to its slider, which forces the user
 	// to manually refresh sessions). a cleaner way to do this down the line is by registering to notifications
 	// whenever a new session is added, but that's too hard to justify for how easy this solution is
-	maxTimeBetweenSessionRefreshes = time.Second * 45
+	maxTimeBetweenSessionRefreshes = time.Second * 90
 )
 
 // this matches friendly device names (on Windows), e.g. "Headphones (Realtek Audio)"
@@ -208,10 +208,12 @@ func (m *sessionMap) sessionMapped(session Session) bool {
 
 func (m *sessionMap) handleSliderMoveEvent(event SliderMoveEvent) {
 
-	// first of all, ensure our session map isn't moldy
+	// first of all, ensure our session map isn't moldy - do this asynchronously to avoid blocking
 	if m.lastSessionRefresh.Add(maxTimeBetweenSessionRefreshes).Before(time.Now()) {
-		m.logger.Debug("Stale session map detected on slider move, refreshing")
-		m.refreshSessions(true)
+		m.logger.Debug("Stale session map detected on slider move, refreshing asynchronously")
+		go func() {
+			m.refreshSessions(true)
+		}()
 	}
 
 	// get the targets mapped to this slider from the config
@@ -223,7 +225,6 @@ func (m *sessionMap) handleSliderMoveEvent(event SliderMoveEvent) {
 	}
 
 	targetFound := false
-	adjustmentFailed := false
 
 	// for each possible target for this slider...
 	for _, target := range targets {
@@ -245,29 +246,33 @@ func (m *sessionMap) handleSliderMoveEvent(event SliderMoveEvent) {
 
 			targetFound = true
 
-			// iterate all matching sessions and adjust the volume of each one
+			// iterate all matching sessions and adjust the volume of each one asynchronously
 			for _, session := range sessions {
 				if session.GetVolume() != event.PercentValue {
-					if err := session.SetVolume(event.PercentValue); err != nil {
-						m.logger.Warnw("Failed to set target session volume", "error", err)
-						adjustmentFailed = true
-					}
+					// Use a goroutine to make volume adjustments non-blocking
+					go func(s Session, volume float32) {
+						if err := s.SetVolume(volume); err != nil {
+							m.logger.Warnw("Failed to set target session volume", "error", err)
+							// If we get an error, trigger a session refresh asynchronously
+							// This handles stale sessions and other audio system issues
+							go func() {
+								time.Sleep(100 * time.Millisecond) // Small delay to avoid spam
+								m.refreshSessions(true)
+							}()
+						}
+					}(session, event.PercentValue)
 				}
 			}
 		}
 	}
 
-	// if we still haven't found a target or the volume adjustment failed, maybe look for the target again.
+	// if we still haven't found a target, maybe look for the target again.
 	// processes could've opened since the last time this slider moved.
 	// if they haven't, the cooldown will take care to not spam it up
 	if !targetFound {
-		m.refreshSessions(false)
-	} else if adjustmentFailed {
-
-		// performance: the reason that forcing a refresh here is okay is that we'll only get here
-		// when a session's SetVolume call errored, such as in the case of a stale master session
-		// (or another, more catastrophic failure happens)
-		m.refreshSessions(true)
+		go func() {
+			m.refreshSessions(false)
+		}()
 	}
 }
 

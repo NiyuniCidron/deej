@@ -107,6 +107,12 @@ func (d *Deej) initializeTray(onDone func()) {
 		refreshSessions := systray.AddMenuItem("Re-scan audio sessions", "Manually refresh audio sessions if something's stuck")
 		refreshSessions.SetIcon(icon.RefreshSessions)
 
+		// Arduino commands submenu
+		arduinoMenu := systray.AddMenuItem("Arduino Commands", "Send commands to the Arduino")
+
+		rebootArduino := arduinoMenu.AddSubMenuItem("Reboot Arduino", "Soft reboot the Arduino device")
+		requestVersion := arduinoMenu.AddSubMenuItem("Request Version", "Get Arduino firmware version")
+
 		if d.version != "" {
 			systray.AddSeparator()
 			versionInfo := systray.AddMenuItem(d.version, "")
@@ -147,6 +153,19 @@ func (d *Deej) initializeTray(onDone func()) {
 					// performance: the reason that forcing a refresh here is okay is that users can't spam the
 					// right-click -> select-this-option sequence at a rate that's meaningful to performance
 					d.sessions.refreshSessions(true)
+
+				// Arduino commands
+				case <-rebootArduino.ClickedCh:
+					logger.Info("Reboot Arduino menu item clicked, sending reboot command")
+					if err := d.serial.RebootArduino(); err != nil {
+						logger.Warnw("Failed to send reboot command to Arduino", "error", err)
+					}
+
+				case <-requestVersion.ClickedCh:
+					logger.Info("Request version menu item clicked, sending version request")
+					if err := d.serial.RequestVersion(); err != nil {
+						logger.Warnw("Failed to send version request to Arduino", "error", err)
+					}
 				}
 			}
 		}()

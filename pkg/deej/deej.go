@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -141,32 +142,67 @@ func (d *Deej) run() {
 	// watch the config file for changes
 	go d.config.WatchConfigFileChanges()
 
-	// connect to the arduino for the first time
+	// connect to the arduino for the first time with retry logic
 	go func() {
-		if err := d.serial.Start(); err != nil {
-			d.logger.Warnw("Failed to start first-time serial connection", "error", err)
+		// Try initial connection with retries
+		maxRetries := 5
+		retryDelay := 2 * time.Second
 
-			// If the port is busy, that's because something else is connected - notify and quit
-			if errors.Is(err, os.ErrPermission) {
-				d.logger.Warnw("Serial port seems busy, notifying user and closing",
-					"comPort", d.config.ConnectionInfo.COMPort)
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			d.logger.Infow("Attempting initial Arduino connection", "attempt", attempt, "maxRetries", maxRetries)
 
-				d.notifier.Notify(fmt.Sprintf("Can't connect to %s!", d.config.ConnectionInfo.COMPort),
-					"This serial port is busy, make sure to close any serial monitor or other deej instance.")
+			if err := d.serial.Start(); err == nil {
+				d.logger.Info("Initial Arduino connection successful")
+				return
+			} else {
+				d.logger.Warnw("Failed to start first-time serial connection", "attempt", attempt, "error", err)
 
-				d.signalStop()
+				// If the port is busy, that's because something else is connected - notify and quit
+				if errors.Is(err, os.ErrPermission) {
+					d.logger.Warnw("Serial port seems busy, notifying user and closing",
+						"comPort", d.config.ConnectionInfo.COMPort)
 
-				// also notify if the COM port they gave isn't found, maybe their config is wrong
-			} else if errors.Is(err, os.ErrNotExist) {
-				d.logger.Warnw("Provided COM port seems wrong, notifying user and closing",
-					"comPort", d.config.ConnectionInfo.COMPort)
+					d.notifier.Notify(fmt.Sprintf("Can't connect to %s!", d.config.ConnectionInfo.COMPort),
+						"This serial port is busy, make sure to close any serial monitor or other deej instance.")
 
-				d.notifier.Notify(fmt.Sprintf("Can't connect to %s!", d.config.ConnectionInfo.COMPort),
-					"This serial port doesn't exist, check your configuration and make sure it's set correctly.")
+					d.signalStop()
+					return
 
-				d.signalStop()
+					// also notify if the COM port they gave isn't found, maybe their config is wrong
+				} else if errors.Is(err, os.ErrNotExist) {
+					d.logger.Warnw("Provided COM port seems wrong, notifying user and closing",
+						"comPort", d.config.ConnectionInfo.COMPort)
+
+					d.notifier.Notify(fmt.Sprintf("Can't connect to %s!", d.config.ConnectionInfo.COMPort),
+						"This serial port doesn't exist, check your configuration and make sure it's set correctly.")
+
+					d.signalStop()
+					return
+				}
+
+				// For other errors, retry after delay
+				if attempt < maxRetries {
+					d.logger.Infow("Retrying initial connection", "attempt", attempt+1, "delay", retryDelay)
+					time.Sleep(retryDelay)
+				}
 			}
 		}
+
+		// If we get here, all retries failed
+		d.logger.Error("All initial connection attempts failed, starting reconnection loop")
+
+		// Start the reconnection loop for ongoing attempts
+		go func() {
+			for {
+				time.Sleep(5 * time.Second)
+				if err := d.serial.Start(); err == nil {
+					d.logger.Info("Successfully connected to Arduino after initial failures")
+					return
+				} else {
+					d.logger.Debugw("Reconnection attempt failed", "error", err)
+				}
+			}
+		}()
 	}()
 
 	// wait until stopped (gracefully)

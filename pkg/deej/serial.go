@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -33,6 +34,7 @@ type SerialIO struct {
 
 	lastKnownNumSliders        int
 	currentSliderPercentValues []float32
+	sliderDataMutex            sync.Mutex
 
 	sliderMoveConsumers []chan SliderMoveEvent
 }
@@ -151,15 +153,43 @@ func autoDetectArduinoPort(baudRate uint, logger *zap.SugaredLogger) (string, er
 			logger.Debugw("Failed to open candidate port", "port", port, "error", err)
 			continue // skip if can't open (e.g., permission denied)
 		}
-		// Give Arduino time to reset
-		time.Sleep(2 * time.Second)
-		buf := make([]byte, 64)
-		n, _ := f.Read(buf)
-		f.Close()
-		if n > 0 && strings.Contains(string(buf[:n]), "deej") { // Check for enhanced startup message
-			logger.Infow("Detected Arduino device", "port", port)
-			return port, nil
+		// Give Arduino time to reset and respond
+		time.Sleep(3 * time.Second)
+
+		// Try to read multiple times in case the Arduino is slow to respond
+		for attempt := 1; attempt <= 3; attempt++ {
+			buf := make([]byte, 256)
+			n, err := f.Read(buf)
+			if err != nil {
+				logger.Debugw("Read attempt failed", "port", port, "attempt", attempt, "error", err)
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			if n > 0 {
+				response := string(buf[:n])
+				logger.Debugw("Read response from port", "port", port, "attempt", attempt, "response", response)
+
+				// Check for any deej message (robust detection)
+				lines := strings.Split(response, "\r\n")
+				for _, line := range lines {
+					line = strings.TrimSpace(line)
+					if line == "" {
+						continue
+					}
+					if strings.HasPrefix(line, "deej:") {
+						f.Close()
+						logger.Infow("Detected Arduino device", "port", port, "response_type", "deej_message", "sample_line", line)
+						return port, nil
+					}
+				}
+			}
+
+			// Wait before next attempt
+			time.Sleep(1 * time.Second)
 		}
+
+		f.Close()
 	}
 	return "", fmt.Errorf("no Arduino device found")
 }
@@ -216,6 +246,8 @@ func (sio *SerialIO) Start() error {
 	namedLogger.Infow("Connected", "conn", sio.conn)
 	sio.connected = true
 	sio.reconnecting = false // Reset reconnecting flag on successful connection
+
+	// Set tray icon immediately on connection
 	sio.deej.SetTrayIcon(TrayNormal, DetectSystemTheme())
 
 	// read lines or await a stop
@@ -224,7 +256,8 @@ func (sio *SerialIO) Start() error {
 		lineChannel := sio.readLine(namedLogger, connReader)
 
 		for line := range lineChannel {
-			sio.handleLine(namedLogger, line)
+			// Process each line asynchronously to prevent blocking the serial reading
+			go sio.handleLine(namedLogger, line)
 		}
 
 		// Channel closed means Arduino disconnected
@@ -264,10 +297,10 @@ func (sio *SerialIO) Stop() {
 	}
 }
 
-// SubscribeToSliderMoveEvents returns an unbuffered channel that receives
+// SubscribeToSliderMoveEvents returns a buffered channel that receives
 // a sliderMoveEvent struct every time a slider moves
 func (sio *SerialIO) SubscribeToSliderMoveEvents() chan SliderMoveEvent {
-	ch := make(chan SliderMoveEvent)
+	ch := make(chan SliderMoveEvent, 100) // Buffer up to 100 events to prevent blocking
 	sio.sliderMoveConsumers = append(sio.sliderMoveConsumers, ch)
 
 	return ch
@@ -358,28 +391,55 @@ func (sio *SerialIO) readLine(logger *zap.SugaredLogger, reader *bufio.Reader) c
 }
 
 func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
+	// Trim whitespace and newlines
+	line = strings.TrimSpace(line)
 
-	// Handle heartbeat signal
-	if strings.Contains(line, "heartbeat") {
-		if sio.deej.Verbose() {
-			logger.Debug("Received heartbeat from Arduino")
+	// Handle new deej protocol messages
+	if strings.HasPrefix(line, "deej:") {
+		parts := strings.Split(line, ":")
+		if len(parts) < 3 {
+			return // Invalid message format
 		}
-		sio.deej.SetTrayIcon(TrayNormal, DetectSystemTheme())
-		return
+
+		messageType := parts[2]
+
+		switch messageType {
+		case "startup":
+			if len(parts) >= 4 {
+				capabilities := parts[3]
+				logger.Infow("Arduino connected", "version", parts[1], "capabilities", capabilities)
+			}
+			sio.deej.SetTrayIcon(TrayNormal, DetectSystemTheme())
+			return
+
+		case "sliders":
+			if len(parts) >= 4 {
+				// Extract slider data from the message
+				sliderData := parts[3]
+				sio.processSliderData(logger, sliderData)
+			}
+			return
+
+		case "response":
+			if len(parts) >= 4 {
+				responseType := parts[3]
+				sio.handleCommandResponse(logger, responseType, parts[4:])
+			}
+			return
+		}
 	}
 
-	// Handle status messages
+	// Fallback: Handle old format messages for backward compatibility
 	if strings.HasPrefix(line, "status:") {
 		status := strings.TrimSpace(strings.TrimPrefix(line, "status:"))
 		if sio.deej.Verbose() {
-			logger.Debugw("Received status from Arduino", "status", status)
+			logger.Debugw("Received status from Arduino (old format)", "status", status)
 		}
 
 		switch status {
 		case "ok":
 			sio.deej.SetTrayIcon(TrayNormal, DetectSystemTheme())
 		case "warning":
-			// Could set a warning icon here if you have one
 			sio.deej.SetTrayIcon(TrayNormal, DetectSystemTheme())
 		default:
 			sio.deej.SetTrayIcon(TrayError, DetectSystemTheme())
@@ -387,32 +447,20 @@ func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
 		return
 	}
 
-	// Handle version info (startup message)
-	if strings.HasPrefix(line, "deej:") {
-		parts := strings.Split(line, ":")
-		if len(parts) >= 3 {
-			version := parts[1]
-			capabilities := parts[2]
-			logger.Infow("Arduino connected", "version", version, "capabilities", capabilities)
-		}
-		sio.deej.SetTrayIcon(TrayNormal, DetectSystemTheme())
-		return
+	// Handle old format slider data
+	if expectedLinePattern.MatchString(line) {
+		sio.processSliderData(logger, line)
 	}
+}
 
-	// Handle regular slider data
-	// this function receives an unsanitized line which is guaranteed to end with LF,
-	// but most lines will end with CRLF. it may also have garbage instead of
-	// deej-formatted values, so we must check for that! just ignore bad ones
-	if !expectedLinePattern.MatchString(line) {
-		return
-	}
-
-	// trim the suffix
-	line = strings.TrimSuffix(line, "\r\n")
-
+func (sio *SerialIO) processSliderData(logger *zap.SugaredLogger, sliderData string) {
 	// split on pipe (|), this gives a slice of numerical strings between "0" and "1023"
-	splitLine := strings.Split(line, "|")
+	splitLine := strings.Split(sliderData, "|")
 	numSliders := len(splitLine)
+
+	// Use a mutex to protect shared state when processing slider data concurrently
+	sio.sliderDataMutex.Lock()
+	defer sio.sliderDataMutex.Unlock()
 
 	// update our slider count, if needed - this will send slider move events for all
 	if numSliders != sio.lastKnownNumSliders {
@@ -428,6 +476,8 @@ func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
 
 	// for each slider:
 	moveEvents := []SliderMoveEvent{}
+	targetValues := make([]float32, numSliders)
+
 	for sliderIdx, stringValue := range splitLine {
 
 		// convert string values to integers ("1023" -> 1023)
@@ -436,7 +486,7 @@ func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
 		// turns out the first line could come out dirty sometimes (i.e. "4558|925|41|643|220")
 		// so let's check the first number for correctness just in case
 		if sliderIdx == 0 && number > 1023 {
-			sio.logger.Debugw("Got malformed line from serial, ignoring", "line", line)
+			sio.logger.Debugw("Got malformed line from serial, ignoring", "line", sliderData)
 			return
 		}
 
@@ -450,6 +500,8 @@ func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
 		if sio.deej.config.InvertSliders {
 			normalizedScalar = 1 - normalizedScalar
 		}
+
+		targetValues[sliderIdx] = normalizedScalar
 
 		// check if it changes the desired state (could just be a jumpy raw slider value)
 		if util.SignificantlyDifferent(sio.currentSliderPercentValues[sliderIdx], normalizedScalar, sio.deej.config.NoiseReductionLevel) {
@@ -470,10 +522,83 @@ func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
 
 	// deliver move events if there are any, towards all potential consumers
 	if len(moveEvents) > 0 {
+		if sio.deej.Verbose() {
+			logger.Debugw("Processing slider events", "count", len(moveEvents))
+		}
 		for _, consumer := range sio.sliderMoveConsumers {
 			for _, moveEvent := range moveEvents {
-				consumer <- moveEvent
+				// Use non-blocking send to prevent serial processing from being blocked
+				select {
+				case consumer <- moveEvent:
+					// Event sent successfully
+				default:
+					// Channel is full, skip this event to prevent blocking
+					if sio.deej.Verbose() {
+						logger.Debugw("Slider event channel full, skipping event", "sliderID", moveEvent.SliderID)
+					}
+				}
 			}
 		}
+	}
+}
+
+// SendCommand sends a command to the Arduino
+func (sio *SerialIO) SendCommand(command string) error {
+	if !sio.connected || sio.conn == nil {
+		return fmt.Errorf("not connected to Arduino")
+	}
+
+	// Format command with protocol prefix
+	formattedCommand := fmt.Sprintf("deej:%s:command:%s\n", "v2.0", command)
+
+	_, err := sio.conn.Write([]byte(formattedCommand))
+	if err != nil {
+		sio.logger.Warnw("Failed to send command to Arduino", "command", command, "error", err)
+		return fmt.Errorf("send command: %w", err)
+	}
+
+	sio.logger.Debugw("Sent command to Arduino", "command", command)
+	return nil
+}
+
+// RebootArduino sends a reboot command to the Arduino
+func (sio *SerialIO) RebootArduino() error {
+	return sio.SendCommand("reboot")
+}
+
+// RequestVersion sends a version request command to the Arduino
+func (sio *SerialIO) RequestVersion() error {
+	return sio.SendCommand("version")
+}
+
+func (sio *SerialIO) handleCommandResponse(logger *zap.SugaredLogger, responseType string, responseArgs []string) {
+	// Handle command response based on the response type
+	switch responseType {
+	case "reboot_ack":
+		logger.Info("Arduino acknowledged reboot command, device will restart")
+		return
+
+	case "version":
+		if len(responseArgs) >= 1 {
+			version := responseArgs[0]
+			logger.Infow("Arduino firmware version", "version", version)
+		} else {
+			logger.Info("Arduino version response received")
+		}
+		return
+
+	case "error":
+		if len(responseArgs) >= 2 {
+			errorType := responseArgs[0]
+			errorDetails := responseArgs[1]
+			logger.Warnw("Arduino command error", "type", errorType, "details", errorDetails)
+		} else {
+			logger.Warn("Arduino command error received")
+		}
+		return
+
+	default:
+		logger.Debugw("Unhandled command response type", "type", responseType, "args", responseArgs)
+		return
 	}
 }
