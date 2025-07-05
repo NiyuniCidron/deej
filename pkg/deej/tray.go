@@ -2,13 +2,91 @@ package deej
 
 import (
 	//"github.com/getlantern/systray"
+	"os"
+
 	"fyne.io/systray"
 	"github.com/omriharel/deej/pkg/deej/icon"
 	"github.com/omriharel/deej/pkg/deej/util"
 )
 
+// ThemeType represents the system theme
+type ThemeType int
+
+const (
+	ThemeDark ThemeType = iota
+	ThemeLight
+)
+
+// TrayState represents the tray icon state
+type TrayState int
+
+const (
+	TrayNormal TrayState = iota
+	TrayError
+)
+
+// DetectSystemTheme attempts to detect the system theme on Linux
+func DetectSystemTheme() ThemeType {
+	// Check GTK theme
+	if gtkTheme := os.Getenv("GTK_THEME"); gtkTheme != "" {
+		if isLightTheme(gtkTheme) {
+			return ThemeLight
+		}
+		return ThemeDark
+	}
+	// Check common desktop environment variables
+	if xdgTheme := os.Getenv("XDG_CURRENT_DESKTOP"); xdgTheme != "" {
+		if isLightTheme(xdgTheme) {
+			return ThemeLight
+		}
+		return ThemeDark
+	}
+	// Fallback to dark
+	return ThemeDark
+}
+
+func isLightTheme(theme string) bool {
+	// crude check for common light theme names
+	lightNames := []string{"light", "adwaita", "breeze-light", "yaru-light"}
+	for _, name := range lightNames {
+		if containsIgnoreCase(theme, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsIgnoreCase(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr ||
+		len(s) > len(substr) && (containsIgnoreCase(s[1:], substr) || containsIgnoreCase(s, substr[1:]))) ||
+		len(s) > 0 && len(substr) > 0 && (s[0]|32) == (substr[0]|32) && containsIgnoreCase(s[1:], substr[1:])
+}
+
+// SetTrayIcon sets the tray icon based on state and theme
+func (d *Deej) SetTrayIcon(state TrayState, theme ThemeType) {
+	switch state {
+	case TrayNormal:
+		switch theme {
+		case ThemeLight:
+			systray.SetIcon(icon.NormalLightIcon)
+		default:
+			systray.SetIcon(icon.NormalDarkIcon)
+		}
+	case TrayError:
+		switch theme {
+		case ThemeLight:
+			systray.SetIcon(icon.ErrorLightIcon)
+		default:
+			systray.SetIcon(icon.ErrorDarkIcon)
+		}
+	}
+}
+
 func (d *Deej) initializeTray(onDone func()) {
 	logger := d.logger.Named("tray")
+
+	theme := DetectSystemTheme()
+	d.SetTrayIcon(TrayNormal, theme)
 
 	onReady := func() {
 		logger.Debug("Tray instance ready")
