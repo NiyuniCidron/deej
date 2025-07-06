@@ -44,14 +44,6 @@ const (
 	// and needs to be limited in some manner. this value was previously user-configurable through a config
 	// key "process_refresh_frequency", but exposing this type of implementation detail seems wrong now
 	minTimeBetweenSessionRefreshes = time.Second * 5
-
-	// determines whether the map should be refreshed when a slider moves.
-	// this is a bit greedy but allows us to ensure sessions are always re-acquired, which is
-	// especially important for process groups (because you can have one ongoing session
-	// always preventing lookup of other processes bound to its slider, which forces the user
-	// to manually refresh sessions). a cleaner way to do this down the line is by registering to notifications
-	// whenever a new session is added, but that's too hard to justify for how easy this solution is
-	maxTimeBetweenSessionRefreshes = time.Second * 90
 )
 
 // this matches friendly device names (on Windows), e.g. "Headphones (Realtek Audio)"
@@ -59,6 +51,8 @@ var deviceSessionKeyPattern = regexp.MustCompile(`^.+ \(.+\)$`)
 
 func newSessionMap(deej *Deej, logger *zap.SugaredLogger, sessionFinder SessionFinder) (*sessionMap, error) {
 	logger = logger.Named("sessions")
+
+	logger.Debug("Creating session map instance")
 
 	m := &sessionMap{
 		deej:          deej,
@@ -74,6 +68,8 @@ func newSessionMap(deej *Deej, logger *zap.SugaredLogger, sessionFinder SessionF
 }
 
 func (m *sessionMap) initialize() error {
+	m.logger.Info("Initializing session map")
+
 	if err := m.getAndAddSessions(); err != nil {
 		m.logger.Warnw("Failed to get all sessions during session map initialization", "error", err)
 		return fmt.Errorf("get all sessions during init: %w", err)
@@ -82,6 +78,7 @@ func (m *sessionMap) initialize() error {
 	m.setupOnConfigReload()
 	m.setupOnSliderMove()
 
+	m.logger.Info("Session map initialization complete")
 	return nil
 }
 
@@ -94,11 +91,7 @@ func (m *sessionMap) release() error {
 	return nil
 }
 
-// assumes the session map is clean!
-// only call on a new session map or as part of refreshSessions which calls reset
 func (m *sessionMap) getAndAddSessions() error {
-
-	// mark that we're refreshing before anything else
 	m.lastSessionRefresh = time.Now()
 	m.unmappedSessions = nil
 
@@ -110,42 +103,36 @@ func (m *sessionMap) getAndAddSessions() error {
 
 	for _, session := range sessions {
 		m.add(session)
-
 		if !m.sessionMapped(session) {
-			m.logger.Debugw("Tracking unmapped session", "session", session)
 			m.unmappedSessions = append(m.unmappedSessions, session)
 		}
 	}
 
-	m.logger.Infow("Got all audio sessions successfully", "sessionMap", m)
-
+	m.logger.Infow("Discovered audio sessions", "count", len(sessions))
 	return nil
 }
 
 func (m *sessionMap) setupOnConfigReload() {
 	configReloadedChannel := m.deej.config.SubscribeToChanges()
-
 	go func() {
-		for {
-			select {
-			case <-configReloadedChannel:
-				m.logger.Info("Detected config reload, attempting to re-acquire all audio sessions")
-				m.refreshSessions(false)
-			}
+		for range configReloadedChannel {
+			m.logger.Info("Config reloaded, refreshing audio sessions")
+			m.refreshSessions(false)
 		}
 	}()
 }
 
 func (m *sessionMap) setupOnSliderMove() {
+	m.logger.Debug("Setting up slider move event subscription")
 	sliderEventsChannel := m.deej.serial.SubscribeToSliderMoveEvents()
-
+	m.logger.Debug("Subscribed to slider move events")
 	go func() {
-		for {
-			select {
-			case event := <-sliderEventsChannel:
-				m.handleSliderMoveEvent(event)
-			}
+		m.logger.Debug("Starting slider event processing loop")
+		for event := range sliderEventsChannel {
+			m.logger.Debugw("Received slider move event", "sliderID", event.SliderID, "percentValue", event.PercentValue)
+			m.handleSliderMoveEvent(event)
 		}
+		m.logger.Debug("Slider event processing loop ended")
 	}()
 }
 
@@ -207,72 +194,38 @@ func (m *sessionMap) sessionMapped(session Session) bool {
 }
 
 func (m *sessionMap) handleSliderMoveEvent(event SliderMoveEvent) {
-
-	// first of all, ensure our session map isn't moldy - do this asynchronously to avoid blocking
-	if m.lastSessionRefresh.Add(maxTimeBetweenSessionRefreshes).Before(time.Now()) {
-		m.logger.Debug("Stale session map detected on slider move, refreshing asynchronously")
-		go func() {
-			m.refreshSessions(true)
-		}()
-	}
-
-	// get the targets mapped to this slider from the config
+	m.logger.Debugw("Handling slider move event", "sliderID", event.SliderID, "percentValue", event.PercentValue)
 	targets, ok := m.deej.config.SliderMapping.get(event.SliderID)
-
-	// if slider not found in config, silently ignore
 	if !ok {
+		m.logger.Debugw("No targets mapped for slider", "sliderID", event.SliderID)
 		return
 	}
 
-	targetFound := false
-
-	// for each possible target for this slider...
+	m.logger.Debugw("Found targets for slider", "sliderID", event.SliderID, "targets", targets)
 	for _, target := range targets {
-
-		// resolve the target name by cleaning it up and applying any special transformations.
-		// depending on the transformation applied, this can result in more than one target name
 		resolvedTargets := m.resolveTarget(target)
-
-		// for each resolved target...
+		m.logger.Debugw("Resolved target", "original", target, "resolved", resolvedTargets)
 		for _, resolvedTarget := range resolvedTargets {
-
-			// check the map for matching sessions
 			sessions, ok := m.get(resolvedTarget)
-
-			// no sessions matching this target - move on
 			if !ok {
+				m.logger.Debugw("No sessions found for target", "target", resolvedTarget)
 				continue
 			}
-
-			targetFound = true
-
-			// iterate all matching sessions and adjust the volume of each one asynchronously
+			m.logger.Debugw("Found sessions for target", "target", resolvedTarget, "sessionCount", len(sessions))
 			for _, session := range sessions {
-				if session.GetVolume() != event.PercentValue {
-					// Use a goroutine to make volume adjustments non-blocking
-					go func(s Session, volume float32) {
-						if err := s.SetVolume(volume); err != nil {
-							m.logger.Warnw("Failed to set target session volume", "error", err)
-							// If we get an error, trigger a session refresh asynchronously
-							// This handles stale sessions and other audio system issues
-							go func() {
-								time.Sleep(100 * time.Millisecond) // Small delay to avoid spam
-								m.refreshSessions(true)
-							}()
-						}
-					}(session, event.PercentValue)
-				}
+				go func(s Session, volume float32, target string) {
+					if err := s.SetVolume(volume); err != nil {
+						m.logger.Warnw("Failed to set session volume", "target", target, "error", err)
+						go func() {
+							time.Sleep(100 * time.Millisecond)
+							m.refreshSessions(true)
+						}()
+					} else {
+						m.logger.Debugw("Successfully set session volume", "target", target, "volume", volume)
+					}
+				}(session, event.PercentValue, resolvedTarget)
 			}
 		}
-	}
-
-	// if we still haven't found a target, maybe look for the target again.
-	// processes could've opened since the last time this slider moved.
-	// if they haven't, the cooldown will take care to not spam it up
-	if !targetFound {
-		go func() {
-			m.refreshSessions(false)
-		}()
 	}
 }
 
@@ -329,16 +282,23 @@ func (m *sessionMap) applyTargetTransform(specialTargetName string) []string {
 }
 
 func (m *sessionMap) add(value Session) {
+	m.logger.Debugw("About to add session to map", "session", value)
+
+	m.logger.Debug("About to acquire lock")
 	m.lock.Lock()
+	m.logger.Debug("Lock acquired")
 	defer m.lock.Unlock()
 
 	key := value.Key()
+	m.logger.Debugw("Session key", "key", key)
 
 	existing, ok := m.m[key]
 	if !ok {
 		m.m[key] = []Session{value}
+		m.logger.Debugw("Created new session list", "key", key)
 	} else {
 		m.m[key] = append(existing, value)
+		m.logger.Debugw("Added to existing session list", "key", key, "count", len(m.m[key]))
 	}
 }
 

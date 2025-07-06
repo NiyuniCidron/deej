@@ -29,9 +29,18 @@ void setup() {
   for (int i = 0; i < NUM_SLIDERS; i++) {
     lastSentValues[i] = -1; // Force initial send
   }
+  
+  // Read initial slider values and send them immediately
+  updateSliderValues();
+  sendSliderValues();
+  updateLastSentValues();
+  delay(100); // Give time for the initial values to be transmitted
 }
 
 void loop() {
+  // Check for incoming commands first
+  checkForCommands();
+  
   updateSliderValues();
   
   // Prioritize slider data - send immediately if there are changes
@@ -66,18 +75,19 @@ void updateLastSentValues() {
 }
 
 void sendSliderValues() {
-  // Use more efficient string building
-  Serial.print("deej:");
-  Serial.print(FIRMWARE_VERSION);
-  Serial.print(":sliders:");
+  // Build the complete message in a single string for efficiency
+  String message = "deej:";
+  message += FIRMWARE_VERSION;
+  message += ":sliders:";
   
   for (int i = 0; i < NUM_SLIDERS; i++) {
-    Serial.print(analogSliderValues[i]);
+    message += analogSliderValues[i];
     if (i < NUM_SLIDERS - 1) {
-      Serial.print("|");
+      message += "|";
     }
   }
-  Serial.println();
+  
+  Serial.println(message);
 }
 
 void checkForCommands() {
@@ -108,27 +118,30 @@ void processCommand(String command) {
   
   if (command == "reboot") {
     // Send acknowledgment before rebooting
-    Serial.print("deej:");
-    Serial.print(FIRMWARE_VERSION);
-    Serial.println(":response:reboot_ack");
+    String response = "deej:";
+    response += FIRMWARE_VERSION;
+    response += ":response:reboot_ack";
+    Serial.println(response);
     delay(100); // Give time for the response to be sent
     // Soft reboot by jumping to address 0
     asm volatile ("jmp 0");
   }
   else if (command == "version") {
-    Serial.print("deej:");
-    Serial.print(FIRMWARE_VERSION);
-    Serial.print(":response:version:");
-    Serial.println(FIRMWARE_VERSION);
+    String response = "deej:";
+    response += FIRMWARE_VERSION;
+    response += ":response:version:";
+    response += FIRMWARE_VERSION;
+    Serial.println(response);
   }
   else if (command == "sliders") {
     sendSliderValues();
   }
   else {
     // Unknown command
-    Serial.print("deej:");
-    Serial.print(FIRMWARE_VERSION);
-    Serial.print(":response:error:unknown_command:");
-    Serial.println(command);
+    String response = "deej:";
+    response += FIRMWARE_VERSION;
+    response += ":response:error:unknown_command:";
+    response += command;
+    Serial.println(response);
   }
 }

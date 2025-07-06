@@ -47,6 +47,8 @@ type SliderMoveEvent struct {
 
 var expectedLinePattern = regexp.MustCompile(`^\d{1,4}(\|\d{1,4})*\r\n$`)
 
+const firmwareVersion = "v2.0"
+
 // NewSerialIO creates a SerialIO instance that uses the provided deej
 // instance's connection info to establish communications with the arduino chip
 func NewSerialIO(deej *Deej, logger *zap.SugaredLogger) (*SerialIO, error) {
@@ -154,18 +156,35 @@ func autoDetectArduinoPort(baudRate uint, logger *zap.SugaredLogger) (string, er
 			continue // skip if can't open (e.g., permission denied)
 		}
 		// Give Arduino time to reset and respond
-		time.Sleep(3 * time.Second)
+		time.Sleep(1 * time.Second)
 
 		// Try to read multiple times in case the Arduino is slow to respond
 		for attempt := 1; attempt <= 3; attempt++ {
+			logger.Debugw("Attempting to read from port", "port", port, "attempt", attempt)
+
+			// Send a command to request slider data to trigger a response
+			if attempt == 1 {
+				logger.Debugw("Sending slider request command to trigger response", "port", port)
+				sliderCommand := fmt.Sprintf("deej:%s:command:sliders\n", firmwareVersion)
+				_, writeErr := f.Write([]byte(sliderCommand))
+				if writeErr != nil {
+					logger.Debugw("Failed to send slider request command", "port", port, "error", writeErr)
+				} else {
+					logger.Debugw("Slider request command sent successfully", "port", port)
+					// Give Arduino time to respond
+					time.Sleep(200 * time.Millisecond)
+				}
+			}
+
 			buf := make([]byte, 256)
 			n, err := f.Read(buf)
 			if err != nil {
 				logger.Debugw("Read attempt failed", "port", port, "attempt", attempt, "error", err)
-				time.Sleep(1 * time.Second)
+				time.Sleep(500 * time.Millisecond)
 				continue
 			}
 
+			logger.Debugw("Read data from port", "port", port, "attempt", attempt, "bytesRead", n)
 			if n > 0 {
 				response := string(buf[:n])
 				logger.Debugw("Read response from port", "port", port, "attempt", attempt, "response", response)
@@ -177,18 +196,35 @@ func autoDetectArduinoPort(baudRate uint, logger *zap.SugaredLogger) (string, er
 					if line == "" {
 						continue
 					}
+					logger.Debugw("Checking line for deej message", "port", port, "line", line)
 					if strings.HasPrefix(line, "deej:") {
-						f.Close()
 						logger.Infow("Detected Arduino device", "port", port, "response_type", "deej_message", "sample_line", line)
+
+						// Send reboot command to ensure Arduino goes through full startup sequence
+						logger.Infow("Sending reboot command to Arduino to ensure proper startup sequence", "port", port)
+						rebootCommand := fmt.Sprintf("deej:%s:command:reboot\n", firmwareVersion)
+						_, writeErr := f.Write([]byte(rebootCommand))
+						if writeErr != nil {
+							logger.Warnw("Failed to send reboot command", "port", port, "error", writeErr)
+						} else {
+							logger.Infow("Reboot command sent successfully", "port", port)
+							// Give Arduino time to process reboot command
+							time.Sleep(200 * time.Millisecond)
+						}
+
+						f.Close()
 						return port, nil
 					}
 				}
+			} else {
+				logger.Debugw("No data read from port", "port", port, "attempt", attempt)
 			}
 
 			// Wait before next attempt
-			time.Sleep(1 * time.Second)
+			time.Sleep(500 * time.Millisecond)
 		}
 
+		logger.Debugw("No deej device found on port", "port", port)
 		f.Close()
 	}
 	return "", fmt.Errorf("no Arduino device found")
@@ -249,6 +285,10 @@ func (sio *SerialIO) Start() error {
 
 	// Set tray icon immediately on connection
 	sio.deej.SetTrayIcon(TrayNormal, DetectSystemTheme())
+
+	// Give Arduino time to reboot and send startup sequence if a reboot was triggered
+	// This ensures we receive the initial slider data
+	time.Sleep(1 * time.Second)
 
 	// read lines or await a stop
 	go func() {
@@ -476,7 +516,6 @@ func (sio *SerialIO) processSliderData(logger *zap.SugaredLogger, sliderData str
 
 	// for each slider:
 	moveEvents := []SliderMoveEvent{}
-	targetValues := make([]float32, numSliders)
 
 	for sliderIdx, stringValue := range splitLine {
 
@@ -501,10 +540,11 @@ func (sio *SerialIO) processSliderData(logger *zap.SugaredLogger, sliderData str
 			normalizedScalar = 1 - normalizedScalar
 		}
 
-		targetValues[sliderIdx] = normalizedScalar
-
 		// check if it changes the desired state (could just be a jumpy raw slider value)
-		if util.SignificantlyDifferent(sio.currentSliderPercentValues[sliderIdx], normalizedScalar, sio.deej.config.NoiseReductionLevel) {
+		// For initial values (when currentSliderPercentValues[sliderIdx] == -1.0), always process
+		// to ensure initial volume levels are set
+		if sio.currentSliderPercentValues[sliderIdx] == -1.0 ||
+			util.SignificantlyDifferent(sio.currentSliderPercentValues[sliderIdx], normalizedScalar, sio.deej.config.NoiseReductionLevel) {
 
 			// if it does, update the saved value and create a move event
 			sio.currentSliderPercentValues[sliderIdx] = normalizedScalar
@@ -524,6 +564,9 @@ func (sio *SerialIO) processSliderData(logger *zap.SugaredLogger, sliderData str
 	if len(moveEvents) > 0 {
 		if sio.deej.Verbose() {
 			logger.Debugw("Processing slider events", "count", len(moveEvents))
+		} else {
+			// Always log initial slider events for debugging
+			logger.Infow("Processing initial slider events", "count", len(moveEvents), "consumers", len(sio.sliderMoveConsumers))
 		}
 		for _, consumer := range sio.sliderMoveConsumers {
 			for _, moveEvent := range moveEvents {
@@ -539,6 +582,11 @@ func (sio *SerialIO) processSliderData(logger *zap.SugaredLogger, sliderData str
 				}
 			}
 		}
+	} else {
+		// Log when no events are generated (for debugging)
+		if sio.deej.Verbose() {
+			logger.Debugw("No slider events generated", "sliderData", sliderData)
+		}
 	}
 }
 
@@ -549,7 +597,7 @@ func (sio *SerialIO) SendCommand(command string) error {
 	}
 
 	// Format command with protocol prefix
-	formattedCommand := fmt.Sprintf("deej:%s:command:%s\n", "v2.0", command)
+	formattedCommand := fmt.Sprintf("deej:%s:command:%s\n", firmwareVersion, command)
 
 	_, err := sio.conn.Write([]byte(formattedCommand))
 	if err != nil {
@@ -563,12 +611,22 @@ func (sio *SerialIO) SendCommand(command string) error {
 
 // RebootArduino sends a reboot command to the Arduino
 func (sio *SerialIO) RebootArduino() error {
+	// Notify user that reboot command is being sent
+	sio.deej.notifier.Notify("Arduino Reboot", "Sending reboot command to Arduino...")
+
 	return sio.SendCommand("reboot")
 }
 
 // RequestVersion sends a version request command to the Arduino
 func (sio *SerialIO) RequestVersion() error {
 	return sio.SendCommand("version")
+}
+
+// GetNumSliders returns the number of sliders detected from the Arduino
+func (sio *SerialIO) GetNumSliders() int {
+	sio.sliderDataMutex.Lock()
+	defer sio.sliderDataMutex.Unlock()
+	return sio.lastKnownNumSliders
 }
 
 func (sio *SerialIO) handleCommandResponse(logger *zap.SugaredLogger, responseType string, responseArgs []string) {

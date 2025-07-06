@@ -3,6 +3,7 @@ package deej
 import (
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/jfreymuth/pulse/proto"
 	"go.uber.org/zap"
@@ -47,30 +48,37 @@ func newSessionFinder(logger *zap.SugaredLogger) (SessionFinder, error) {
 }
 
 func (sf *paSessionFinder) GetAllSessions() ([]Session, error) {
+	sf.logger.Debug("Starting GetAllSessions")
 	sessions := []Session{}
 
 	// get the master sink session
+	sf.logger.Debug("Getting master sink session")
 	masterSink, err := sf.getMasterSinkSession()
 	if err == nil {
 		sessions = append(sessions, masterSink)
+		sf.logger.Debug("Added master sink session")
 	} else {
 		sf.logger.Warnw("Failed to get master audio sink session", "error", err)
 	}
 
 	// get the master source session
+	sf.logger.Debug("Getting master source session")
 	masterSource, err := sf.getMasterSourceSession()
 	if err == nil {
 		sessions = append(sessions, masterSource)
+		sf.logger.Debug("Added master source session")
 	} else {
 		sf.logger.Warnw("Failed to get master audio source session", "error", err)
 	}
 
 	// enumerate sink inputs and add sessions along the way
+	sf.logger.Debug("Enumerating sink inputs")
 	if err := sf.enumerateAndAddSessions(&sessions); err != nil {
 		sf.logger.Warnw("Failed to enumerate audio sessions", "error", err)
 		return nil, fmt.Errorf("enumerate audio sessions: %w", err)
 	}
 
+	sf.logger.Debugw("GetAllSessions complete", "sessionCount", len(sessions))
 	return sessions, nil
 }
 
@@ -86,16 +94,32 @@ func (sf *paSessionFinder) Release() error {
 }
 
 func (sf *paSessionFinder) getMasterSinkSession() (Session, error) {
+	sf.logger.Debug("Requesting master sink info")
+
 	request := proto.GetSinkInfo{
 		SinkIndex: proto.Undefined,
 	}
 	reply := proto.GetSinkInfoReply{}
 
-	if err := sf.client.Request(&request, &reply); err != nil {
-		sf.logger.Warnw("Failed to get master sink info", "error", err)
-		return nil, fmt.Errorf("get master sink info: %w", err)
+	// Use a channel to implement timeout
+	done := make(chan error, 1)
+	go func() {
+		done <- sf.client.Request(&request, &reply)
+	}()
+
+	// Wait for either completion or timeout
+	select {
+	case err := <-done:
+		if err != nil {
+			sf.logger.Warnw("Failed to get master sink info", "error", err)
+			return nil, fmt.Errorf("get master sink info: %w", err)
+		}
+	case <-time.After(2 * time.Second):
+		sf.logger.Warnw("Timeout getting master sink info")
+		return nil, fmt.Errorf("timeout getting master sink info")
 	}
 
+	sf.logger.Debug("Got master sink info, creating session")
 	// create the master sink session
 	sink := newMasterSession(sf.sessionLogger, sf.client, reply.SinkIndex, reply.Channels, true)
 
@@ -103,16 +127,32 @@ func (sf *paSessionFinder) getMasterSinkSession() (Session, error) {
 }
 
 func (sf *paSessionFinder) getMasterSourceSession() (Session, error) {
+	sf.logger.Debug("Requesting master source info")
+
 	request := proto.GetSourceInfo{
 		SourceIndex: proto.Undefined,
 	}
 	reply := proto.GetSourceInfoReply{}
 
-	if err := sf.client.Request(&request, &reply); err != nil {
-		sf.logger.Warnw("Failed to get master source info", "error", err)
-		return nil, fmt.Errorf("get master source info: %w", err)
+	// Use a channel to implement timeout
+	done := make(chan error, 1)
+	go func() {
+		done <- sf.client.Request(&request, &reply)
+	}()
+
+	// Wait for either completion or timeout
+	select {
+	case err := <-done:
+		if err != nil {
+			sf.logger.Warnw("Failed to get master source info", "error", err)
+			return nil, fmt.Errorf("get master source info: %w", err)
+		}
+	case <-time.After(2 * time.Second):
+		sf.logger.Warnw("Timeout getting master source info")
+		return nil, fmt.Errorf("timeout getting master source info")
 	}
 
+	sf.logger.Debug("Got master source info, creating session")
 	// create the master source session
 	source := newMasterSession(sf.sessionLogger, sf.client, reply.SourceIndex, reply.Channels, false)
 
@@ -120,22 +160,47 @@ func (sf *paSessionFinder) getMasterSourceSession() (Session, error) {
 }
 
 func (sf *paSessionFinder) enumerateAndAddSessions(sessions *[]Session) error {
+	sf.logger.Debug("Starting enumerateAndAddSessions")
+
 	request := proto.GetSinkInputInfoList{}
 	reply := proto.GetSinkInputInfoListReply{}
 
-	if err := sf.client.Request(&request, &reply); err != nil {
-		sf.logger.Warnw("Failed to get sink input list", "error", err)
-		return fmt.Errorf("get sink input list: %w", err)
+	sf.logger.Debug("Requesting sink input list from PulseAudio")
+
+	// Use a channel to implement timeout
+	done := make(chan error, 1)
+	go func() {
+		done <- sf.client.Request(&request, &reply)
+	}()
+
+	// Wait for either completion or timeout
+	select {
+	case err := <-done:
+		if err != nil {
+			sf.logger.Warnw("Failed to get sink input list", "error", err)
+			return fmt.Errorf("get sink input list: %w", err)
+		}
+	case <-time.After(2 * time.Second):
+		sf.logger.Warnw("Timeout getting sink input list")
+		return fmt.Errorf("timeout getting sink input list")
 	}
 
-	for _, info := range reply {
+	sf.logger.Debugw("Got sink input list", "count", len(reply))
+
+	for i, info := range reply {
+		sf.logger.Debugw("Processing sink input", "index", i, "sinkInputIndex", info.SinkInputIndex)
+
+		// Try to get the process binary name first, fall back to application name
 		name, ok := info.Properties["application.process.binary"]
-
 		if !ok {
-			sf.logger.Warnw("Failed to get sink input's process name",
-				"sinkInputIndex", info.SinkInputIndex)
-
-			continue
+			// Fall back to application.name if process.binary is not available
+			name, ok = info.Properties["application.name"]
+			if !ok {
+				sf.logger.Warnw("Failed to get sink input's process name or application name",
+					"sinkInputIndex", info.SinkInputIndex)
+				continue
+			}
+			sf.logger.Debugw("Using application.name as fallback", "name", name.String())
 		}
 
 		// create the deej session object
@@ -143,8 +208,9 @@ func (sf *paSessionFinder) enumerateAndAddSessions(sessions *[]Session) error {
 
 		// add it to our slice
 		*sessions = append(*sessions, newSession)
-
+		sf.logger.Debugw("Added sink input session", "name", name.String())
 	}
 
+	sf.logger.Debug("Finished enumerateAndAddSessions")
 	return nil
 }

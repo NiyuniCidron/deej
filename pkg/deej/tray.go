@@ -2,6 +2,7 @@ package deej
 
 import (
 	//"github.com/getlantern/systray"
+	"net/http"
 	"os"
 
 	"fyne.io/systray"
@@ -104,6 +105,9 @@ func (d *Deej) initializeTray(onDone func()) {
 		editConfig := systray.AddMenuItem("Edit configuration", "Open config file with notepad")
 		editConfig.SetIcon(icon.EditConfig)
 
+		configWindow := systray.AddMenuItem("Configuration Window", "Open web-based configuration interface")
+		configWindow.SetIcon(icon.EditConfig)
+
 		refreshSessions := systray.AddMenuItem("Re-scan audio sessions", "Manually refresh audio sessions if something's stuck")
 		refreshSessions.SetIcon(icon.RefreshSessions)
 
@@ -144,6 +148,26 @@ func (d *Deej) initializeTray(onDone func()) {
 
 					if err := util.OpenExternal(logger, editor, userConfigFilepath); err != nil {
 						logger.Warnw("Failed to open config file for editing", "error", err)
+					}
+
+					// configuration window
+				case <-configWindow.ClickedCh:
+					logger.Info("Configuration window menu item clicked, opening web config interface")
+
+					webConfig := NewWebConfigServer(d, logger)
+					go func() {
+						if err := webConfig.Start(); err != nil && err != http.ErrServerClosed {
+							logger.Errorw("Web config server error", "error", err)
+						}
+					}()
+
+					// Open the web browser
+					browserCmd := "xdg-open"
+					if !util.Linux() {
+						browserCmd = "start"
+					}
+					if err := util.OpenExternal(logger, browserCmd, "http://localhost:8080"); err != nil {
+						logger.Warnw("Failed to open web browser", "error", err)
 					}
 
 				// refresh sessions

@@ -24,7 +24,7 @@ func init() {
 func main() {
 
 	// first we need a logger
-	logger, err := deej.NewLogger(buildType)
+	logger, err := deej.NewLogger()
 	if err != nil {
 		panic(fmt.Sprintf("Failed to create logger: %v", err))
 	}

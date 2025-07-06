@@ -99,6 +99,8 @@ func (d *Deej) Initialize() error {
 		return fmt.Errorf("init session map: %w", err)
 	}
 
+	d.logger.Debug("About to check for tray mode")
+
 	// decide whether to run with/without tray
 	if _, noTraySet := os.LookupEnv(envNoTray); noTraySet {
 
@@ -109,7 +111,9 @@ func (d *Deej) Initialize() error {
 		d.run()
 
 	} else {
+		d.logger.Debug("About to setup interrupt handler")
 		d.setupInterruptHandler()
+		d.logger.Debug("About to initialize tray")
 		d.initializeTray(d.run)
 	}
 

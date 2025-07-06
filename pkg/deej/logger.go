@@ -2,6 +2,7 @@ package deej
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -11,35 +12,31 @@ import (
 )
 
 const (
-	buildTypeNone    = ""
-	buildTypeDev     = "dev"
-	buildTypeRelease = "release"
-
 	logDirectory = "logs"
 	logFilename  = "deej-latest-run.log"
 )
 
+// isDebugMode returns true if DEEJ_DEBUG=1 is set in the environment
+func isDebugMode() bool {
+	return os.Getenv("DEEJ_DEBUG") == "1"
+}
+
 // NewLogger provides a logger instance for the whole program
-func NewLogger(buildType string) (*zap.SugaredLogger, error) {
+func NewLogger() (*zap.SugaredLogger, error) {
 	var loggerConfig zap.Config
 
-	// release: info and above, log to file only (no UI)
-	if buildType == buildTypeRelease {
+	if isDebugMode() {
+		loggerConfig = zap.NewDevelopmentConfig()
+		loggerConfig.Level = zap.NewAtomicLevelAt(zap.DebugLevel)
+		loggerConfig.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	} else {
 		if err := util.EnsureDirExists(logDirectory); err != nil {
 			return nil, fmt.Errorf("ensure log directory exists: %w", err)
 		}
-
 		loggerConfig = zap.NewProductionConfig()
-
+		loggerConfig.Level = zap.NewAtomicLevelAt(zap.InfoLevel)
 		loggerConfig.OutputPaths = []string{filepath.Join(logDirectory, logFilename)}
 		loggerConfig.Encoding = "console"
-
-		// development: debug and above, log to stderr only, colorful
-	} else {
-		loggerConfig = zap.NewDevelopmentConfig()
-
-		// make it colorful
-		loggerConfig.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	}
 
 	// all build types: make it readable
