@@ -2,12 +2,25 @@ package deej
 
 import (
 	"fmt"
+	"io/ioutil"
 	"net"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jfreymuth/pulse/proto"
 	"go.uber.org/zap"
 )
+
+// getProcessNameFromPID returns the process name for a given PID using /proc
+func getProcessNameFromPID(pid uint32) string {
+	commPath := "/proc/" + strconv.Itoa(int(pid)) + "/comm"
+	data, err := ioutil.ReadFile(commPath)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
 
 type paSessionFinder struct {
 	logger        *zap.SugaredLogger
@@ -203,8 +216,11 @@ func (sf *paSessionFinder) enumerateAndAddSessions(sessions *[]Session) error {
 			sf.logger.Debugw("Using application.name as fallback", "name", name.String())
 		}
 
+		// No reliable PID from PulseAudio, set to 0
+		var pid uint32 = 0
+
 		// create the deej session object
-		newSession := newPASession(sf.sessionLogger, sf.client, info.SinkInputIndex, info.Channels, name.String())
+		newSession := newPASession(sf.sessionLogger, sf.client, info.SinkInputIndex, info.Channels, name.String(), pid)
 
 		// add it to our slice
 		*sessions = append(*sessions, newSession)

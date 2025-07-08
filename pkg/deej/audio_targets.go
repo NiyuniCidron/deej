@@ -6,21 +6,35 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/omriharel/deej/pkg/deej/util"
 )
 
+// MprisInfo contains metadata about currently playing media via MPRIS
+type MprisInfo struct {
+	IsPlaying  bool   `json:"isPlaying"`
+	Title      string `json:"title,omitempty"`
+	Artist     string `json:"artist,omitempty"`
+	Album      string `json:"album,omitempty"`
+	PlayerName string `json:"playerName,omitempty"`
+}
+
 // AudioTarget represents an available audio target that can be assigned to a slider
 type AudioTarget struct {
-	Name        string `json:"name"`
-	DisplayName string `json:"displayName"`
-	Type        string `json:"type"` // "special", "process", "device", "installed"
-	Description string `json:"description"`
-	Category    string `json:"category,omitempty"`
-	Icon        string `json:"icon,omitempty"`
+	Name        string     `json:"name"`
+	DisplayName string     `json:"displayName"`
+	Type        string     `json:"type"` // "special", "process", "device", "installed"
+	Description string     `json:"description"`
+	Category    string     `json:"category,omitempty"`
+	Icon        string     `json:"icon,omitempty"`
+	MprisInfo   *MprisInfo `json:"mprisInfo,omitempty"`
 }
 
 // AudioTargetEnumerator provides methods to enumerate available audio targets
@@ -124,8 +138,16 @@ func (d *Deej) getProcessAudioTargets() ([]AudioTarget, error) {
 		return nil, fmt.Errorf("get sessions: %w", err)
 	}
 
-	// Track unique process names to avoid duplicates
-	seenProcesses := make(map[string]bool)
+	// Build MPRIS process name map and bus map
+	mprisMap := getAllMprisPlayers()
+	mprisBusMap := make(map[string]*MprisInfo)
+	for k, v := range mprisMap {
+		if strings.HasPrefix(k, "org.mpris.MediaPlayer2.") {
+			mprisBusMap[k] = v
+		}
+	}
+
+	matchedBusNames := make(map[string]bool)
 
 	for _, session := range sessions {
 		// Skip special sessions (master, mic, system, etc.)
@@ -134,70 +156,292 @@ func (d *Deej) getProcessAudioTargets() ([]AudioTarget, error) {
 			continue
 		}
 
-		processName := sessionKey
-
-		// Skip if we've already seen this process
-		if seenProcesses[processName] {
-			continue
+		// Try to get all possible process names from session properties
+		var processNames []string
+		if pa, ok := session.(interface{ Key() string }); ok {
+			processNames = append(processNames, strings.ToLower(pa.Key()))
+		}
+		if pa, ok := session.(*paSession); ok {
+			if pa.processName != "" {
+				processNames = append(processNames, strings.ToLower(pa.processName))
+			}
 		}
 
-		seenProcesses[processName] = true
-
-		// Create a user-friendly display name
-		displayName := processName
-		if strings.HasSuffix(processName, ".exe") {
-			displayName = strings.TrimSuffix(processName, ".exe")
+		// Try to match any process name to any MPRIS DesktopEntry
+		var mprisInfo *MprisInfo
+		var displayName string
+		for _, name := range processNames {
+			if info, ok := mprisMap[name]; ok {
+				mprisInfo = info
+				displayName = info.PlayerName
+				// Mark all bus names for this info as matched
+				for bus, i := range mprisBusMap {
+					if i == info {
+						matchedBusNames[bus] = true
+					}
+				}
+				break
+			}
 		}
 
-		// Capitalize first letter and add spaces before capitals
-		displayName = strings.Title(strings.ToLower(displayName))
-		displayName = strings.ReplaceAll(displayName, ".", " ")
+		if len(processNames) > 0 {
+			displayName = processNames[0]
+			displayName = strings.TrimSuffix(displayName, ".exe")
+			displayName = cases.Title(language.English).String(strings.ToLower(displayName))
+			displayName = strings.ReplaceAll(displayName, ".", " ")
+		}
 
 		targets = append(targets, AudioTarget{
-			Name:        processName,
+			Name:        processNames[0],
 			DisplayName: displayName,
 			Type:        "process",
-			Description: fmt.Sprintf("Running application: %s", processName),
+			Description: fmt.Sprintf("Running application: %s", processNames[0]),
+			MprisInfo:   mprisInfo,
 		})
 	}
 
-	// --- MPRIS media players (Linux only) ---
-	if util.Linux() {
-		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
-		defer cancel()
-		conn, err := dbus.ConnectSessionBus()
+	// List unmatched MPRIS players (by bus name)
+	for bus, info := range mprisBusMap {
+		if matchedBusNames[bus] {
+			continue
+		}
+		targets = append(targets, AudioTarget{
+			Name:        bus,
+			DisplayName: info.PlayerName,
+			Type:        "mpris-unmatched",
+			Description: "Unmatched MPRIS player (no audio session)",
+			MprisInfo:   info,
+		})
+	}
+
+	return targets, nil
+}
+
+// getMprisInfo attempts to get MPRIS metadata for a given process name
+func getMprisInfo(processName string) *MprisInfo {
+	if !util.Linux() {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	conn, err := dbus.ConnectSessionBus()
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+
+	var names []string
+	call := conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.ListNames", 0)
+	if call.Err != nil {
+		return nil
+	}
+	if err := call.Store(&names); err != nil {
+		return nil
+	}
+
+	// Look for MPRIS players that might match this process
+	for _, name := range names {
+		if !strings.HasPrefix(name, "org.mpris.MediaPlayer2.") {
+			continue
+		}
+
+		// Try to match the player name with the process name
+		playerName := strings.TrimPrefix(name, "org.mpris.MediaPlayer2.")
+		if !strings.Contains(strings.ToLower(playerName), strings.ToLower(processName)) &&
+			!strings.Contains(strings.ToLower(processName), strings.ToLower(playerName)) {
+			continue
+		}
+
+		// Get player identity
+		obj := conn.Object(name, "/org/mpris/MediaPlayer2")
+		var identity dbus.Variant
+		err := obj.CallWithContext(ctx, "org.freedesktop.DBus.Properties.Get", 0, "org.mpris.MediaPlayer2", "Identity").Store(&identity)
+		if err != nil {
+			continue
+		}
+
+		playerIdentity := playerName
+		if s, ok := identity.Value().(string); ok && s != "" {
+			playerIdentity = s
+		}
+
+		// Get playback status
+		var playbackStatus dbus.Variant
+		err = obj.CallWithContext(ctx, "org.freedesktop.DBus.Properties.Get", 0, "org.mpris.MediaPlayer2.Player", "PlaybackStatus").Store(&playbackStatus)
+		if err != nil {
+			continue
+		}
+
+		status, ok := playbackStatus.Value().(string)
+		if !ok {
+			continue
+		}
+
+		isPlaying := status == "Playing"
+
+		// Get metadata
+		var metadata dbus.Variant
+		err = obj.CallWithContext(ctx, "org.freedesktop.DBus.Properties.Get", 0, "org.mpris.MediaPlayer2.Player", "Metadata").Store(&metadata)
+		if err != nil {
+			continue
+		}
+
+		metadataMap, ok := metadata.Value().(map[string]dbus.Variant)
+		if !ok {
+			continue
+		}
+
+		// Extract title, artist, album
+		title := ""
+		artist := ""
+		album := ""
+
+		if titleVar, exists := metadataMap["xesam:title"]; exists {
+			if t, ok := titleVar.Value().(string); ok {
+				title = t
+			}
+		}
+
+		if artistVar, exists := metadataMap["xesam:artist"]; exists {
+			if artists, ok := artistVar.Value().([]string); ok && len(artists) > 0 {
+				artist = artists[0]
+			}
+		}
+
+		if albumVar, exists := metadataMap["xesam:album"]; exists {
+			if a, ok := albumVar.Value().(string); ok {
+				album = a
+			}
+		}
+
+		return &MprisInfo{
+			IsPlaying:  isPlaying,
+			Title:      title,
+			Artist:     artist,
+			Album:      album,
+			PlayerName: playerIdentity,
+		}
+	}
+
+	return nil
+}
+
+// getAllMprisPlayers returns a map of processName to MprisInfo for all active MPRIS players
+func getAllMprisPlayers() map[string]*MprisInfo {
+	mprisMap := make(map[string]*MprisInfo)
+	mprisBusMap := make(map[string]*MprisInfo) // bus name -> MprisInfo
+	if !util.Linux() {
+		return mprisMap
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+
+	conn, err := dbus.ConnectSessionBus()
+	if err != nil {
+		return mprisMap
+	}
+	defer conn.Close()
+
+	var names []string
+	call := conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.ListNames", 0)
+	if call.Err != nil {
+		return mprisMap
+	}
+	if err := call.Store(&names); err != nil {
+		return mprisMap
+	}
+
+	for _, name := range names {
+		if !strings.HasPrefix(name, "org.mpris.MediaPlayer2.") {
+			continue
+		}
+		obj := conn.Object(name, "/org/mpris/MediaPlayer2")
+
+		var processName string
+		// Try DesktopEntry, but don't require it
+		var desktopEntry dbus.Variant
+		err := obj.CallWithContext(ctx, "org.freedesktop.DBus.Properties.Get", 0, "org.mpris.MediaPlayer2", "DesktopEntry").Store(&desktopEntry)
 		if err == nil {
-			defer conn.Close()
-			var names []string
-			call := conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.ListNames", 0)
+			if pn, ok := desktopEntry.Value().(string); ok && pn != "" {
+				processName = strings.ToLower(pn)
+			}
+		}
+
+		// Try to get process name from PID if DesktopEntry is not available
+		if processName == "" {
+			var uniqueName string
+			call := conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.GetNameOwner", 0, name)
 			if call.Err == nil {
-				_ = call.Store(&names)
-				for _, name := range names {
-					if strings.HasPrefix(name, "org.mpris.MediaPlayer2.") {
-						obj := conn.Object(name, "/org/mpris/MediaPlayer2")
-						var identity dbus.Variant
-						err := obj.CallWithContext(ctx, "org.freedesktop.DBus.Properties.Get", 0, "org.mpris.MediaPlayer2", "Identity").Store(&identity)
-						idStr := strings.TrimPrefix(name, "org.mpris.MediaPlayer2.")
-						if err == nil {
-							if s, ok := identity.Value().(string); ok && s != "" {
-								idStr = s
+				if err := call.Store(&uniqueName); err == nil && uniqueName != "" {
+					var pid uint32
+					pidCall := conn.BusObject().CallWithContext(ctx, "org.freedesktop.DBus.GetConnectionUnixProcessID", 0, uniqueName)
+					if pidCall.Err == nil {
+						if err := pidCall.Store(&pid); err == nil && pid > 0 {
+							procName := getProcessNameFromPID(pid)
+							if procName != "" && procName != "xdg-dbus-proxy" && procName != "bwrap" {
+								processName = strings.ToLower(procName)
 							}
 						}
-						targets = append(targets, AudioTarget{
-							Name:        name,
-							DisplayName: idStr,
-							Type:        "mpris",
-							Description: "MPRIS media player",
-							Category:    "Media Player",
-						})
 					}
 				}
 			}
 		}
-	}
-	// --- End MPRIS ---
 
-	return targets, nil
+		// Get identity
+		var identity dbus.Variant
+		_ = obj.CallWithContext(ctx, "org.freedesktop.DBus.Properties.Get", 0, "org.mpris.MediaPlayer2", "Identity").Store(&identity)
+		playerIdentity := strings.TrimPrefix(name, "org.mpris.MediaPlayer2.")
+		if s, ok := identity.Value().(string); ok && s != "" {
+			playerIdentity = s
+		}
+
+		// Get playback status
+		var playbackStatus dbus.Variant
+		_ = obj.CallWithContext(ctx, "org.freedesktop.DBus.Properties.Get", 0, "org.mpris.MediaPlayer2.Player", "PlaybackStatus").Store(&playbackStatus)
+		status, _ := playbackStatus.Value().(string)
+		isPlaying := status == "Playing"
+
+		// Get metadata
+		var metadata dbus.Variant
+		_ = obj.CallWithContext(ctx, "org.freedesktop.DBus.Properties.Get", 0, "org.mpris.MediaPlayer2.Player", "Metadata").Store(&metadata)
+		metadataMap, _ := metadata.Value().(map[string]dbus.Variant)
+		title := ""
+		artist := ""
+		album := ""
+		if titleVar, exists := metadataMap["xesam:title"]; exists {
+			if t, ok := titleVar.Value().(string); ok {
+				title = t
+			}
+		}
+		if artistVar, exists := metadataMap["xesam:artist"]; exists {
+			if artists, ok := artistVar.Value().([]string); ok && len(artists) > 0 {
+				artist = artists[0]
+			}
+		}
+		if albumVar, exists := metadataMap["xesam:album"]; exists {
+			if a, ok := albumVar.Value().(string); ok {
+				album = a
+			}
+		}
+
+		info := &MprisInfo{
+			IsPlaying:  isPlaying,
+			Title:      title,
+			Artist:     artist,
+			Album:      album,
+			PlayerName: playerIdentity,
+		}
+		if processName != "" {
+			mprisMap[processName] = info
+		}
+		mprisBusMap[name] = info
+	}
+	// Attach bus name map for unmatched listing
+	mprisMap["__bus_map__"] = (*MprisInfo)(nil) // marker for getProcessAudioTargets
+	return mprisMap
 }
 
 // getDeviceAudioTargets returns audio targets for audio devices (Windows only)
@@ -404,4 +648,37 @@ func getLinuxInstalledApps() ([]AudioTarget, error) {
 	}
 
 	return targets, nil
+}
+
+// Add this helper function near getProcessNameFromPID
+func getParentPID(pid uint32) uint32 {
+	statPath := fmt.Sprintf("/proc/%d/stat", pid)
+	data, err := os.ReadFile(statPath)
+	if err != nil {
+		return 0
+	}
+	fields := strings.Fields(string(data))
+	if len(fields) < 4 {
+		return 0
+	}
+	ppid, err := strconv.Atoi(fields[3])
+	if err != nil {
+		return 0
+	}
+	return uint32(ppid)
+}
+
+// Add this helper function near getProcessNameFromPID and getParentPID
+func getRealProcessNameFromPID(pid uint32) string {
+	for i := 0; i < 5; i++ { // limit to 5 hops to avoid infinite loops
+		name := getProcessNameFromPID(pid)
+		if name != "xdg-dbus-proxy" && name != "bwrap" && name != "" {
+			return strings.ToLower(name)
+		}
+		pid = getParentPID(pid)
+		if pid == 0 {
+			break
+		}
+	}
+	return ""
 }

@@ -8,7 +8,7 @@ require (
 	github.com/fsnotify/fsnotify v1.7.0
 	github.com/gen2brain/beeep v0.0.0-20200420150314-13046a26d502
 	github.com/go-ole/go-ole v1.2.6
-	github.com/godbus/dbus/v5 v5.1.0 // for MPRIS D-Bus support
+	github.com/godbus/dbus/v5 v5.1.0 // for MPRIS metadata
 	github.com/gopherjs/gopherjs v0.0.0-20200217142428-fce0ec30dd00 // indirect
 	github.com/jacobsa/go-serial v0.0.0-20180131005756-15cf729a72d4
 	github.com/jfreymuth/pulse v0.0.0-20200608153616-84b2d752b9d4

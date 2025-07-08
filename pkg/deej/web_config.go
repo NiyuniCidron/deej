@@ -207,6 +207,41 @@ func (wcs *WebConfigServer) handleIndex(w http.ResponseWriter, r *http.Request) 
             max-height: 80vh;
             overflow-y: auto;
         }
+        .accordion {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-bottom: 10px;
+        }
+        .accordion-header {
+            background-color: #f8f9fa;
+            padding: 10px 15px;
+            cursor: pointer;
+            border-bottom: 1px solid #ddd;
+            font-weight: 500;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .accordion-header:hover {
+            background-color: #e9ecef;
+        }
+        .accordion-header:last-child {
+            border-bottom: none;
+        }
+        .accordion-content {
+            display: none;
+            padding: 15px;
+            background-color: white;
+        }
+        .accordion-content.expanded {
+            display: block;
+        }
+        .accordion-icon {
+            transition: transform 0.2s;
+        }
+        .accordion-icon.expanded {
+            transform: rotate(180deg);
+        }
         .modal-buttons {
             text-align: center;
             margin-top: 20px;
@@ -424,7 +459,6 @@ func (wcs *WebConfigServer) handleIndex(w http.ResponseWriter, r *http.Request) 
             // Group targets by type and category
             const specialTargets = targets.filter(t => t.type === 'special');
             const processTargets = targets.filter(t => t.type === 'process');
-            const mprisTargets = targets.filter(t => t.type === 'mpris');
             const deviceTargets = targets.filter(t => t.type === 'device');
             let installedTargets = targets.filter(t => t.type === 'installed');
             // Filter installed targets by search
@@ -456,26 +490,55 @@ func (wcs *WebConfigServer) handleIndex(w http.ResponseWriter, r *http.Request) 
                 processTargets.forEach(target => {
                     const btn = document.createElement('button');
                     btn.className = 'modal-btn btn-secondary';
-                    btn.textContent = target.displayName;
+                    
+                    // Create display text with MPRIS info if available
+                    let displayText = target.displayName;
+                    if (target.mprisInfo && target.mprisInfo.isPlaying) {
+                        let mprisText = '';
+                        if (target.mprisInfo.title) {
+                            mprisText = target.mprisInfo.title;
+                            if (target.mprisInfo.artist) {
+                                mprisText += ' by ' + target.mprisInfo.artist;
+                            }
+                        } else if (target.mprisInfo.artist) {
+                            mprisText = target.mprisInfo.artist;
+                        }
+                        
+                        if (mprisText) {
+                            displayText += ' - Playing: ' + mprisText;
+                        }
+                    }
+                    
+                    btn.textContent = displayText;
                     btn.title = target.description;
                     btn.onclick = function() { selectTarget(target.name); };
                     list.appendChild(btn);
                 });
             }
-            // Add MPRIS media players section
-            if (mprisTargets.length > 0) {
+
+            // Add unmatched MPRIS players section
+            const unmatchedMprisTargets = targets.filter(t => t.type === 'mpris-unmatched');
+            if (unmatchedMprisTargets.length > 0) {
                 const mprisSection = document.createElement('div');
-                mprisSection.innerHTML = '<h4 style="margin: 15px 0 5px 0; color: #007acc;">Media Players</h4>';
+                mprisSection.innerHTML = '<h4 style="margin: 15px 0 5px 0; color: #007acc;">Unmatched MPRIS Players</h4>';
                 list.appendChild(mprisSection);
-                mprisTargets.forEach(target => {
+                unmatchedMprisTargets.forEach(target => {
                     const btn = document.createElement('button');
                     btn.className = 'modal-btn btn-secondary';
-                    btn.textContent = target.displayName;
+                    let displayText = target.displayName || target.name;
+                    if (target.mprisInfo && target.mprisInfo.title) {
+                        displayText += ' - ' + target.mprisInfo.title;
+                        if (target.mprisInfo.artist) {
+                            displayText += ' by ' + target.mprisInfo.artist;
+                        }
+                    }
+                    btn.textContent = displayText;
                     btn.title = target.description;
                     btn.onclick = function() { selectTarget(target.name); };
                     mprisSection.appendChild(btn);
                 });
             }
+
             // Add device targets section
             if (deviceTargets.length > 0) {
                 const deviceSection = document.createElement('div');
@@ -490,11 +553,8 @@ func (wcs *WebConfigServer) handleIndex(w http.ResponseWriter, r *http.Request) 
                     list.appendChild(btn);
                 });
             }
-            // Add installed applications section (grouped by category)
+            // Add installed applications section (grouped by category) - accordion style
             if (installedTargets.length > 0) {
-                const installedSection = document.createElement('div');
-                installedSection.innerHTML = '<h4 style="margin: 15px 0 5px 0; color: #007acc;">Installed Applications</h4>';
-                list.appendChild(installedSection);
                 // Group installed apps by category
                 const categories = {};
                 installedTargets.forEach(target => {
@@ -504,12 +564,33 @@ func (wcs *WebConfigServer) handleIndex(w http.ResponseWriter, r *http.Request) 
                     }
                     categories[category].push(target);
                 });
+                
                 // Sort categories alphabetically
                 const sortedCategories = Object.keys(categories).sort();
+                
+                // Create accordion container
+                const accordionContainer = document.createElement('div');
+                accordionContainer.className = 'accordion';
+                
+                // Create accordion header
+                const accordionHeader = document.createElement('div');
+                accordionHeader.className = 'accordion-header';
+                accordionHeader.innerHTML = '<span>Installed Applications (' + installedTargets.length + ')</span><span class="accordion-icon">▼</span>';
+                accordionHeader.onclick = function() {
+                    const content = accordionContainer.querySelector('.accordion-content');
+                    const icon = accordionHeader.querySelector('.accordion-icon');
+                    content.classList.toggle('expanded');
+                    icon.classList.toggle('expanded');
+                };
+                accordionContainer.appendChild(accordionHeader);
+                
+                // Create accordion content
+                const accordionContent = document.createElement('div');
+                accordionContent.className = 'accordion-content';
+                
                 sortedCategories.forEach(category => {
                     const categorySection = document.createElement('div');
-                    categorySection.style.marginLeft = '15px';
-                    categorySection.style.marginBottom = '10px';
+                    categorySection.style.marginBottom = '15px';
                     const categoryHeader = document.createElement('h5');
                     categoryHeader.textContent = category;
                     categoryHeader.style.margin = '10px 0 5px 0';
@@ -529,8 +610,11 @@ func (wcs *WebConfigServer) handleIndex(w http.ResponseWriter, r *http.Request) 
                         btn.onclick = function() { selectTarget(target.name); };
                         categorySection.appendChild(btn);
                     });
-                    list.appendChild(categorySection);
+                    accordionContent.appendChild(categorySection);
                 });
+                
+                accordionContainer.appendChild(accordionContent);
+                list.appendChild(accordionContainer);
             }
             if (specialTargets.length === 0 && processTargets.length === 0 && deviceTargets.length === 0 && installedTargets.length === 0) {
                 list.innerHTML = '<div style="text-align: center; color: #666;">No audio targets found</div>';

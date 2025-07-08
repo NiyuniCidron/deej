@@ -15,6 +15,7 @@ type paSession struct {
 	baseSession
 
 	processName string
+	pid         uint32
 
 	client *proto.Client
 
@@ -38,12 +39,14 @@ func newPASession(
 	sinkInputIndex uint32,
 	sinkInputChannels byte,
 	processName string,
+	pid uint32,
 ) *paSession {
 
 	s := &paSession{
 		client:            client,
 		sinkInputIndex:    sinkInputIndex,
 		sinkInputChannels: sinkInputChannels,
+		pid:               pid,
 	}
 
 	s.processName = processName
@@ -128,6 +131,10 @@ func (s *paSession) Release() {
 
 func (s *paSession) String() string {
 	return fmt.Sprintf(sessionStringFormat, s.humanReadableDesc, s.GetVolume())
+}
+
+func (s *paSession) GetPID() uint32 {
+	return s.pid
 }
 
 func (s *masterSession) GetVolume() float32 {
