@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -27,9 +26,6 @@ type Deej struct {
 	config   *CanonicalConfig
 	serial   *SerialIO
 	sessions *sessionMap
-
-	webConfig      *WebConfigServer
-	webConfigMutex sync.Mutex
 
 	stopChannel chan bool
 	version     string
@@ -240,14 +236,6 @@ func (d *Deej) stop() error {
 
 	d.config.StopWatchingConfigFile()
 	d.serial.Stop()
-
-	d.webConfigMutex.Lock()
-	if d.webConfig != nil {
-		if err := d.webConfig.Stop(); err != nil {
-			d.logger.Warnw("Failed to stop web configuration server", "error", err)
-		}
-	}
-	d.webConfigMutex.Unlock()
 
 	// release the session map
 	if err := d.sessions.release(); err != nil {

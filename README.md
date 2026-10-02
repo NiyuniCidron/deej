@@ -184,7 +184,6 @@ When deej is packaged as a flatpak, the sandbox has its own user and group datab
 | Permission | Why |
 | --- | --- |
 | `--device=all` | see and open the Arduino's serial device |
-| `--share=network` | reach the configuration window on `localhost:8080` |
 | `--socket=session-bus` and `--talk-name=org.freedesktop.Flatpak` | run `getent`, `id`, `zenity` and `pkexec usermod` on the host via `flatpak-spawn --host` |
 
 Without the last one deej can still tell you that it has no access, but it can't name the host's group or fix the membership for you - it will fall back to showing you the `usermod` command to run yourself.
