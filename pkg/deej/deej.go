@@ -148,6 +148,10 @@ func (d *Deej) run() {
 
 	// connect to the arduino for the first time with retry logic
 	go func() {
+		// make sure we're actually allowed to talk to the device before we start retrying,
+		// so the user gets one actionable prompt instead of one per attempt
+		d.verifyDeviceAccess()
+
 		// Try initial connection with retries
 		maxRetries := 5
 		retryDelay := 2 * time.Second
