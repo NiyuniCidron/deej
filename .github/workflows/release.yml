@@ -57,9 +57,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # a semver prerelease suffix (v0.10.0-rc.1) publishes as a prerelease,
+          # a plain version (v0.10.0) publishes as the latest release
+          case "${{ github.ref_name }}" in
+              *-*) maturity=--prerelease ;;
+              *)   maturity=--latest ;;
+          esac
+
           gh release create "${{ github.ref_name }}" \
             --title "deej ${{ github.ref_name }}" \
             --notes-file .github/release-notes.md \
             --generate-notes \
-            --prerelease \
+            "$maturity" \
             flatpak/_build/deej-${{ github.ref_name }}.flatpak
