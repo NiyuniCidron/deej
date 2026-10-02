@@ -6,18 +6,15 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/jacobsa/go-serial/serial"
 	"go.uber.org/zap"
 
-	"github.com/gen2brain/beeep"
 	"github.com/omriharel/deej/pkg/deej/util"
 )
 
@@ -26,8 +23,9 @@ type SerialIO struct {
 	deej   *Deej
 	logger *zap.SugaredLogger
 
-	stopChannel  chan bool
+	connMutex    sync.Mutex
 	connected    bool
+	stopping     bool
 	reconnecting bool
 	connOptions  serial.OpenOptions
 	conn         io.ReadWriteCloser
@@ -57,7 +55,6 @@ func NewSerialIO(deej *Deej, logger *zap.SugaredLogger) (*SerialIO, error) {
 	sio := &SerialIO{
 		deej:                deej,
 		logger:              logger,
-		stopChannel:         make(chan bool),
 		connected:           false,
 		conn:                nil,
 		sliderMoveConsumers: []chan SliderMoveEvent{},
@@ -69,6 +66,21 @@ func NewSerialIO(deej *Deej, logger *zap.SugaredLogger) (*SerialIO, error) {
 	sio.setupOnConfigReload()
 
 	return sio, nil
+}
+
+// portSatisfiesConfig reports whether the port we're currently connected to is the one the
+// config asks for. An auto-detected port never equals the configured "auto", so comparing
+// the two directly would tear down a perfectly good connection on every config reload
+func portSatisfiesConfig(configuredPort string, connectedPort string) bool {
+	if connectedPort == "" {
+		return false
+	}
+
+	if configuredPort == "" || strings.EqualFold(configuredPort, "auto") {
+		return true
+	}
+
+	return configuredPort == connectedPort
 }
 
 // autoDetectArduinoPort scans for likely Arduino serial ports and returns the first one that sends a recognizable signature.
@@ -94,66 +106,10 @@ func autoDetectArduinoPort(baudRate uint, logger *zap.SugaredLogger) (string, er
 		}
 		f, err := serial.Open(opts)
 		if err != nil {
-			if strings.Contains(err.Error(), "permission denied") {
-				// Try to get the group owner of the device
-				if fi, statErr := os.Stat(port); statErr == nil {
-					if stat, ok := fi.Sys().(*syscall.Stat_t); ok {
-						gid := stat.Gid
-						groupNames := []string{}
-						if groupFile, gerr := os.Open("/etc/group"); gerr == nil {
-							scanner := bufio.NewScanner(groupFile)
-							for scanner.Scan() {
-								line := scanner.Text()
-								parts := strings.Split(line, ":")
-								if len(parts) >= 3 && parts[2] == fmt.Sprint(gid) {
-									groupNames = append(groupNames, parts[0])
-								}
-							}
-							groupFile.Close()
-						}
-						groupNameStr := fmt.Sprintf("GID %d (unknown group)", gid)
-						if len(groupNames) > 0 {
-							groupNameStr = strings.Join(groupNames, " or ")
-						}
-						logger.Debugw("Detected group(s) for serial device", "port", port, "gid", gid, "groupNames", groupNameStr)
-
-						user := os.Getenv("USER")
-						if user == "" {
-							user = os.Getenv("USERNAME") // Windows fallback
-						}
-						// Check if user is already in the group
-						checkCmd := exec.Command("id", "-nG", user)
-						output, err := checkCmd.Output()
-						alreadyInGroup := false
-						for _, g := range groupNames {
-							if err == nil && strings.Contains(string(output), g) {
-								alreadyInGroup = true
-								break
-							}
-						}
-						if alreadyInGroup {
-							beeep.Alert("Already a Member", fmt.Sprintf("You are already a member of the '%s' group.\n\nPlease log out and log back in if you still have issues.", groupNameStr), "")
-							continue
-						}
-						// Ask for confirmation using zenity
-						confirm := exec.Command("zenity", "--question", "--text",
-							fmt.Sprintf("Permission denied opening %s.\n\nWould you like to add yourself to the '%s' group?\n\nYou will be prompted for your password.", port, groupNameStr))
-						err = confirm.Run()
-						if err == nil && len(groupNames) > 0 { // User clicked Yes
-							cmd := exec.Command("pkexec", "usermod", "-aG", groupNames[0], user)
-							if err := cmd.Run(); err == nil {
-								beeep.Alert("Action Required", "You have been added to the group.\n\nPlease log out and log back in, then rerun this program to continue.", "")
-							} else {
-								beeep.Alert("Error", "Failed to add you to the group.\n\nPlease run this command manually:\nsudo usermod -aG "+groupNames[0]+" "+user, "")
-							}
-						} else {
-							beeep.Alert("Action Cancelled", "No changes were made.", "")
-						}
-					}
-				}
-			}
+			// permission problems are reported once at startup by verifyDeviceAccess, so
+			// there's nothing to do here but move on to the next candidate
 			logger.Debugw("Failed to open candidate port", "port", port, "error", err)
-			continue // skip if can't open (e.g., permission denied)
+			continue
 		}
 		// Give Arduino time to reset and respond
 		time.Sleep(1 * time.Second)
@@ -233,7 +189,7 @@ func autoDetectArduinoPort(baudRate uint, logger *zap.SugaredLogger) (string, er
 // Start attempts to connect to our arduino chip
 func (sio *SerialIO) Start() error {
 	// don't allow multiple concurrent connections
-	if sio.connected {
+	if sio.isConnected() {
 		sio.logger.Warn("Already connected, can't start another without closing first")
 		return errors.New("serial: connection already active")
 	}
@@ -269,8 +225,7 @@ func (sio *SerialIO) Start() error {
 		"baudRate", sio.connOptions.BaudRate,
 		"minReadSize", minimumReadSize)
 
-	var err error
-	sio.conn, err = serial.Open(sio.connOptions)
+	conn, err := serial.Open(sio.connOptions)
 	if err != nil {
 		// might need a user notification here, TBD
 		sio.logger.Warnw("Failed to open serial connection", "error", err)
@@ -279,9 +234,14 @@ func (sio *SerialIO) Start() error {
 
 	namedLogger := sio.logger.Named(strings.ToLower(sio.connOptions.PortName))
 
-	namedLogger.Infow("Connected", "conn", sio.conn)
+	sio.connMutex.Lock()
+	sio.conn = conn
 	sio.connected = true
+	sio.stopping = false
 	sio.reconnecting = false // Reset reconnecting flag on successful connection
+	sio.connMutex.Unlock()
+
+	namedLogger.Infow("Connected", "conn", conn)
 
 	// Set tray icon immediately on connection
 	sio.deej.SetTrayIcon(TrayNormal, DetectSystemTheme())
@@ -290,9 +250,10 @@ func (sio *SerialIO) Start() error {
 	// This ensures we receive the initial slider data
 	time.Sleep(1 * time.Second)
 
-	// read lines or await a stop
+	// read lines until the connection goes away, either because we closed it or because
+	// the arduino did
 	go func() {
-		connReader := bufio.NewReader(sio.conn)
+		connReader := bufio.NewReader(conn)
 		lineChannel := sio.readLine(namedLogger, connReader)
 
 		for line := range lineChannel {
@@ -300,9 +261,14 @@ func (sio *SerialIO) Start() error {
 			go sio.handleLine(namedLogger, line)
 		}
 
-		// Channel closed means Arduino disconnected
+		// an intentional stop has already closed the connection, and shouldn't be followed
+		// by reconnection attempts - whoever asked for it decides what happens next
+		if sio.close(namedLogger) {
+			namedLogger.Debug("Serial connection closed on request")
+			return
+		}
+
 		sio.logger.Warn("Arduino disconnected")
-		sio.close(namedLogger)
 
 		// Start reconnection attempts if not already reconnecting
 		if !sio.reconnecting {
@@ -327,14 +293,40 @@ func (sio *SerialIO) Start() error {
 	return nil
 }
 
-// Stop signals us to shut down our serial connection, if one is active
+// Stop shuts our serial connection down, if one is active. Closing the connection is what
+// makes the reader goroutine wind itself down, so this returns once the port is free and
+// Start can be called again
 func (sio *SerialIO) Stop() {
-	if sio.connected {
-		sio.logger.Debug("Shutting down serial connection")
-		sio.stopChannel <- true
-	} else {
+	sio.connMutex.Lock()
+
+	if !sio.connected || sio.conn == nil {
+		sio.connMutex.Unlock()
 		sio.logger.Debug("Not currently connected, nothing to stop")
+
+		return
 	}
+
+	// hand the connection over to ourselves so the reader goroutine knows the teardown was
+	// deliberate and doesn't try to close it a second time
+	conn := sio.conn
+	sio.conn = nil
+	sio.connected = false
+	sio.stopping = true
+
+	sio.connMutex.Unlock()
+
+	sio.logger.Debug("Shutting down serial connection")
+
+	if err := conn.Close(); err != nil {
+		sio.logger.Warnw("Failed to close serial connection", "error", err)
+	}
+}
+
+func (sio *SerialIO) isConnected() bool {
+	sio.connMutex.Lock()
+	defer sio.connMutex.Unlock()
+
+	return sio.connected
 }
 
 // SubscribeToSliderMoveEvents returns a buffered channel that receives
@@ -364,7 +356,7 @@ func (sio *SerialIO) setupOnConfigReload() {
 			}()
 
 			// if connection params have changed, attempt to stop and start the connection
-			if sio.deej.config.ConnectionInfo.COMPort != sio.connOptions.PortName ||
+			if !portSatisfiesConfig(sio.deej.config.ConnectionInfo.COMPort, sio.connOptions.PortName) ||
 				uint(sio.deej.config.ConnectionInfo.BaudRate) != sio.connOptions.BaudRate {
 
 				sio.logger.Info("Detected change in connection parameters, attempting to renew connection")
@@ -383,18 +375,34 @@ func (sio *SerialIO) setupOnConfigReload() {
 	}()
 }
 
-func (sio *SerialIO) close(logger *zap.SugaredLogger) {
-	if err := sio.conn.Close(); err != nil {
-		logger.Warnw("Failed to close serial connection", "error", err)
-	} else {
-		logger.Debug("Serial connection closed")
+// close releases the serial connection if it's still ours to release, and reports whether
+// the teardown was requested by Stop rather than caused by the arduino going away
+func (sio *SerialIO) close(logger *zap.SugaredLogger) bool {
+	sio.connMutex.Lock()
+
+	if sio.stopping {
+		sio.connMutex.Unlock()
+		return true
 	}
 
+	conn := sio.conn
 	sio.conn = nil
 	sio.connected = false
 
+	sio.connMutex.Unlock()
+
+	if conn != nil {
+		if err := conn.Close(); err != nil {
+			logger.Warnw("Failed to close serial connection", "error", err)
+		} else {
+			logger.Debug("Serial connection closed")
+		}
+	}
+
 	// Set error icon when disconnected
 	sio.deej.SetTrayIcon(TrayError, DetectSystemTheme())
+
+	return false
 }
 
 func (sio *SerialIO) readLine(logger *zap.SugaredLogger, reader *bufio.Reader) chan string {

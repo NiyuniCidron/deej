@@ -6,6 +6,8 @@ import (
 	"os"
 
 	"fyne.io/systray"
+	"go.uber.org/zap"
+
 	"github.com/omriharel/deej/pkg/deej/icon"
 	"github.com/omriharel/deej/pkg/deej/util"
 )
@@ -102,11 +104,11 @@ func (d *Deej) initializeTray(onDone func()) {
 		systray.SetTitle("deej")
 		systray.SetTooltip("deej")
 
-		editConfig := systray.AddMenuItem("Edit configuration", "Open config file with notepad")
-		editConfig.SetIcon(icon.EditConfig)
+		settings := systray.AddMenuItem("Settings", "Open the settings window")
+		settings.SetIcon(icon.EditConfig)
 
-		configWindow := systray.AddMenuItem("Configuration Window", "Open web-based configuration interface")
-		configWindow.SetIcon(icon.EditConfig)
+		editConfig := systray.AddMenuItem("Edit configuration", "Open config.yaml in your default editor")
+		editConfig.SetIcon(icon.EditConfig)
 
 		refreshSessions := systray.AddMenuItem("Re-scan audio sessions", "Manually refresh audio sessions if something's stuck")
 		refreshSessions.SetIcon(icon.RefreshSessions)
@@ -137,37 +139,16 @@ func (d *Deej) initializeTray(onDone func()) {
 
 					d.signalStop()
 
+				case <-settings.ClickedCh:
+					logger.Info("Settings menu item clicked, opening settings window")
+					d.openSettingsWindow(logger)
+
 				// edit config
 				case <-editConfig.ClickedCh:
 					logger.Info("Edit config menu item clicked, opening config for editing")
 
-					editor := "notepad.exe"
-					if util.Linux() {
-						editor = "gedit"
-					}
-
-					if err := util.OpenExternal(logger, editor, userConfigFilepath); err != nil {
+					if err := d.openConfigFile(logger); err != nil {
 						logger.Warnw("Failed to open config file for editing", "error", err)
-					}
-
-					// configuration window
-				case <-configWindow.ClickedCh:
-					logger.Info("Configuration window menu item clicked, opening web config interface")
-
-					webConfig := NewWebConfigServer(d, logger)
-					go func() {
-						if err := webConfig.Start(); err != nil && err != http.ErrServerClosed {
-							logger.Errorw("Web config server error", "error", err)
-						}
-					}()
-
-					// Open the web browser
-					browserCmd := "xdg-open"
-					if !util.Linux() {
-						browserCmd = "start"
-					}
-					if err := util.OpenExternal(logger, browserCmd, "http://localhost:8080"); err != nil {
-						logger.Warnw("Failed to open web browser", "error", err)
 					}
 
 				// refresh sessions
@@ -205,6 +186,35 @@ func (d *Deej) initializeTray(onDone func()) {
 	// start the tray icon
 	logger.Debug("Running in tray")
 	systray.Run(onReady, onExit)
+}
+
+// openSettingsWindow opens deej's settings UI in the default browser, starting the local
+// server on first use and keeping it running so Save doesn't tear the page down
+func (d *Deej) openSettingsWindow(logger *zap.SugaredLogger) {
+	d.webConfigMutex.Lock()
+
+	if d.webConfig == nil {
+		d.webConfig = NewWebConfigServer(d, logger)
+		server := d.webConfig
+
+		go func() {
+			if err := server.Start(); err != nil && err != http.ErrServerClosed {
+				logger.Errorw("Web config server error", "error", err)
+			}
+		}()
+	}
+
+	url := d.webConfig.URL()
+	d.webConfigMutex.Unlock()
+
+	browserCmd := "xdg-open"
+	if !util.Linux() {
+		browserCmd = "start"
+	}
+
+	if err := util.OpenExternal(logger, browserCmd, url); err != nil {
+		logger.Warnw("Failed to open settings window in browser", "error", err)
+	}
 }
 
 func (d *Deej) stopTray() {

@@ -9,6 +9,9 @@ import (
 	"go.uber.org/zap"
 )
 
+// webConfigAddress is where the configuration interface listens - localhost only, by design
+const webConfigAddress = "localhost:8080"
+
 // WebConfigServer provides a web-based configuration interface
 type WebConfigServer struct {
 	logger *zap.SugaredLogger
@@ -45,16 +48,21 @@ func NewWebConfigServer(deej *Deej, logger *zap.SugaredLogger) *WebConfigServer 
 	mux.HandleFunc("/api/targets", wcs.handleGetTargets)
 
 	wcs.server = &http.Server{
-		Addr:    "localhost:8080",
+		Addr:    webConfigAddress,
 		Handler: mux,
 	}
 
 	return wcs
 }
 
+// URL returns the address the configuration interface can be reached at
+func (wcs *WebConfigServer) URL() string {
+	return "http://" + webConfigAddress
+}
+
 // Start starts the web configuration server
 func (wcs *WebConfigServer) Start() error {
-	wcs.logger.Info("Starting web configuration server on http://localhost:8080")
+	wcs.logger.Infow("Starting web configuration server", "url", wcs.URL())
 	return wcs.server.ListenAndServe()
 }
 
@@ -278,7 +286,9 @@ func (wcs *WebConfigServer) handleIndex(w http.ResponseWriter, r *http.Request) 
         <div id="successMessage" class="success-message"></div>
         <div id="errorMessage" class="error-message"></div>
         
-        <form id="configForm">
+        <!-- returning false here keeps a native form submit (which would navigate away from
+             the settings page) from happening even if the script below fails to load -->
+        <form id="configForm" onsubmit="return false;">
             <div class="section">
                 <h2>Slider Mappings</h2>
                 <div style="text-align: right; margin-bottom: 10px;">
@@ -323,7 +333,7 @@ func (wcs *WebConfigServer) handleIndex(w http.ResponseWriter, r *http.Request) 
             </div>
             
             <div class="buttons">
-                <button type="button" class="btn btn-secondary" onclick="window.close()">Cancel</button>
+                <button type="button" class="btn btn-secondary" onclick="discardChanges()">Discard Changes</button>
                 <button type="submit" class="btn btn-primary">Save Configuration</button>
             </div>
         </form>
@@ -636,8 +646,13 @@ func (wcs *WebConfigServer) handleIndex(w http.ResponseWriter, r *http.Request) 
             closeSpecialModal();
         }
         
+        function discardChanges() {
+            loadConfig();
+            showSuccess('Reverted to the saved configuration.');
+        }
+        
         // Handle form submission
-        document.getElementById('configForm').onsubmit = function(e) {
+        document.getElementById('configForm').addEventListener('submit', function(e) {
             e.preventDefault();
             
             const formData = {
@@ -668,7 +683,10 @@ func (wcs *WebConfigServer) handleIndex(w http.ResponseWriter, r *http.Request) 
             .then(response => response.json())
             .then(data => {
                 if (data.success) {
+                    // deej keeps running and so does this page - reload the saved values so
+                    // what's on screen matches what's on disk, and stay put for further edits
                     showSuccess('Configuration saved successfully!');
+                    loadConfig();
                 } else {
                     showError('Failed to save configuration: ' + data.error);
                 }
@@ -676,7 +694,7 @@ func (wcs *WebConfigServer) handleIndex(w http.ResponseWriter, r *http.Request) 
             .catch(error => {
                 showError('Failed to save configuration: ' + error.message);
             });
-        };
+        });
         
         function showSuccess(message) {
             const successDiv = document.getElementById('successMessage');
@@ -801,6 +819,12 @@ func (wcs *WebConfigServer) handleSaveConfig(w http.ResponseWriter, r *http.Requ
 			"error":   err.Error(),
 		})
 		return
+	}
+
+	// re-derive the canonical fields right away, so that the page re-reading its configuration
+	// immediately after saving doesn't race the config file watcher and show stale values
+	if err := wcs.config.populateFromVipers(); err != nil {
+		wcs.logger.Warnw("Failed to repopulate config fields after saving", "error", err)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

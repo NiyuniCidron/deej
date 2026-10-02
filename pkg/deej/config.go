@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -32,6 +33,8 @@ type CanonicalConfig struct {
 	stopWatcherChannel chan bool
 
 	reloadConsumers []chan bool
+	reloadMutex     sync.Mutex
+	lastReload      time.Time
 
 	userConfig     *viper.Viper
 	internalConfig *viper.Viper
@@ -47,6 +50,8 @@ const (
 	userConfigPath = "."
 
 	configType = "yaml"
+
+	minTimeBetweenReloadAttempts = time.Millisecond * 500
 
 	configKeySliderMapping       = "slider_mapping"
 	configKeyInvertSliders       = "invert_sliders"
@@ -144,12 +149,41 @@ func (cc *CanonicalConfig) Load() error {
 	return nil
 }
 
-// SubscribeToChanges allows external components to receive updates when the config is reloaded
+// SubscribeToChanges allows external components to receive updates when the config is reloaded.
+// The channel is buffered, so a consumer that's busy applying the previous reload can never
+// hold up the reload itself or anyone else subscribed to it
 func (cc *CanonicalConfig) SubscribeToChanges() chan bool {
-	c := make(chan bool)
+	c := make(chan bool, 1)
 	cc.reloadConsumers = append(cc.reloadConsumers, c)
 
 	return c
+}
+
+// Reload re-reads deej's config file from disk and lets everyone know about it. Reloads
+// coming in quicker than minTimeBetweenReloadAttempts of each other are skipped, which both
+// absorbs the double writes many editors do and keeps the file watcher from repeating a
+// reload that saving the config already performed
+func (cc *CanonicalConfig) Reload() error {
+	cc.reloadMutex.Lock()
+	defer cc.reloadMutex.Unlock()
+
+	now := time.Now()
+	if cc.lastReload.Add(minTimeBetweenReloadAttempts).After(now) {
+		cc.logger.Debug("Skipping reload, the config was just reloaded")
+		return nil
+	}
+	cc.lastReload = now
+
+	if err := cc.Load(); err != nil {
+		return err
+	}
+
+	cc.logger.Info("Reloaded config successfully")
+	cc.notifier.Notify("Configuration reloaded!", "Your changes have been applied.")
+
+	cc.onConfigReloaded()
+
+	return nil
 }
 
 // WatchConfigFileChanges starts watching for configuration file changes
@@ -157,12 +191,7 @@ func (cc *CanonicalConfig) SubscribeToChanges() chan bool {
 func (cc *CanonicalConfig) WatchConfigFileChanges() {
 	cc.logger.Debugw("Starting to watch user config file for changes", "path", userConfigFilepath)
 
-	const (
-		minTimeBetweenReloadAttempts = time.Millisecond * 500
-		delayBetweenEventAndReload   = time.Millisecond * 50
-	)
-
-	lastAttemptedReload := time.Now()
+	const delayBetweenEventAndReload = time.Millisecond * 50
 
 	// establish watch using viper as opposed to doing it ourselves, though our internal cooldown is still required
 	cc.userConfig.WatchConfig()
@@ -170,29 +199,13 @@ func (cc *CanonicalConfig) WatchConfigFileChanges() {
 
 		// when we get a write event...
 		if event.Op&fsnotify.Write == fsnotify.Write {
+			cc.logger.Debugw("Config file modified, attempting reload", "event", event)
 
-			now := time.Now()
+			// wait a bit to let the editor actually flush the new file contents to disk
+			<-time.After(delayBetweenEventAndReload)
 
-			// ... check if it's not a duplicate (many editors will write to a file twice)
-			if lastAttemptedReload.Add(minTimeBetweenReloadAttempts).Before(now) {
-
-				// and attempt reload if appropriate
-				cc.logger.Debugw("Config file modified, attempting reload", "event", event)
-
-				// wait a bit to let the editor actually flush the new file contents to disk
-				<-time.After(delayBetweenEventAndReload)
-
-				if err := cc.Load(); err != nil {
-					cc.logger.Warnw("Failed to reload config file", "error", err)
-				} else {
-					cc.logger.Info("Reloaded config successfully")
-					cc.notifier.Notify("Configuration reloaded!", "Your changes have been applied.")
-
-					cc.onConfigReloaded()
-				}
-
-				// don't forget to update the time
-				lastAttemptedReload = now
+			if err := cc.Reload(); err != nil {
+				cc.logger.Warnw("Failed to reload config file", "error", err)
 			}
 		}
 	})
@@ -241,6 +254,12 @@ func (cc *CanonicalConfig) onConfigReloaded() {
 	cc.logger.Debug("Notifying consumers about configuration reload")
 
 	for _, consumer := range cc.reloadConsumers {
-		consumer <- true
+		select {
+		case consumer <- true:
+		default:
+			// this consumer hasn't picked up the previous reload yet, and a pending
+			// notification already tells it everything this one would have
+			cc.logger.Debug("Consumer already has a reload pending, not queueing another")
+		}
 	}
 }
