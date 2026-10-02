@@ -6,6 +6,8 @@ import (
 	"os"
 
 	"fyne.io/systray"
+	"go.uber.org/zap"
+
 	"github.com/omriharel/deej/pkg/deej/icon"
 	"github.com/omriharel/deej/pkg/deej/util"
 )
@@ -154,21 +156,7 @@ func (d *Deej) initializeTray(onDone func()) {
 				case <-configWindow.ClickedCh:
 					logger.Info("Configuration window menu item clicked, opening web config interface")
 
-					webConfig := NewWebConfigServer(d, logger)
-					go func() {
-						if err := webConfig.Start(); err != nil && err != http.ErrServerClosed {
-							logger.Errorw("Web config server error", "error", err)
-						}
-					}()
-
-					// Open the web browser
-					browserCmd := "xdg-open"
-					if !util.Linux() {
-						browserCmd = "start"
-					}
-					if err := util.OpenExternal(logger, browserCmd, "http://localhost:8080"); err != nil {
-						logger.Warnw("Failed to open web browser", "error", err)
-					}
+					d.openConfigWindow(logger)
 
 				// refresh sessions
 				case <-refreshSessions.ClickedCh:
@@ -205,6 +193,36 @@ func (d *Deej) initializeTray(onDone func()) {
 	// start the tray icon
 	logger.Debug("Running in tray")
 	systray.Run(onReady, onExit)
+}
+
+// openConfigWindow points a browser at deej's web configuration interface, starting the
+// server behind it on first use. The server then stays up for as long as deej runs, so the
+// settings page keeps working after saving and re-opening it doesn't try to re-bind the port.
+func (d *Deej) openConfigWindow(logger *zap.SugaredLogger) {
+	d.webConfigMutex.Lock()
+
+	if d.webConfig == nil {
+		d.webConfig = NewWebConfigServer(d, logger)
+		server := d.webConfig
+
+		go func() {
+			if err := server.Start(); err != nil && err != http.ErrServerClosed {
+				logger.Errorw("Web config server error", "error", err)
+			}
+		}()
+	}
+
+	url := d.webConfig.URL()
+	d.webConfigMutex.Unlock()
+
+	browserCmd := "xdg-open"
+	if !util.Linux() {
+		browserCmd = "start"
+	}
+
+	if err := util.OpenExternal(logger, browserCmd, url); err != nil {
+		logger.Warnw("Failed to open web browser", "error", err)
+	}
 }
 
 func (d *Deej) stopTray() {
