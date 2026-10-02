@@ -37,6 +37,7 @@ The configuration window provides a user-friendly, platform-agnostic way to edit
 4. **Configure Settings**: Use the web interface to modify your settings
 5. **Save Changes**: Click "Save Configuration" to apply changes
 6. **Automatic Reload**: Changes are applied immediately without restarting deej
+7. **Keep Editing**: The page stays open after saving and reloads the saved values, so you can keep making changes. "Discard Changes" reverts the form to what's on disk
 
 ## Technical Details
 
@@ -45,6 +46,8 @@ The configuration window provides a user-friendly, platform-agnostic way to edit
 - **Protocol**: HTTP/HTTPS not required (local only)
 - **Security**: No external network access
 - **Browser**: Opens in your default web browser
+- **Lifetime**: Started the first time you open the configuration window and kept running until deej exits, so re-opening it reuses the same server
+- **Flatpak**: Needs `--share=network` in the manifest for the browser to reach `localhost:8080`
 
 ### Configuration Persistence
 - **File Format**: Still uses YAML format for `config.yaml`

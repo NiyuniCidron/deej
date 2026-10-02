@@ -175,6 +175,20 @@ With many different 3D-printed designs being added to our [community showcase](.
 
 ~~- Install `libgtk-3-dev`, `libappindicator3-dev` and `libwebkit2gtk-4.0-dev` for system tray support. Pre-built Linux binaries aren't currently released, so you'll need to [build from source](#building-from-source). If there's demand for pre-built binaries, please [let me know](https://discord.gg/nf88NJu)!~~
 
+- Your user needs to be a member of the group that owns the serial device (commonly `dialout`, `uucp` or `plugdev`, depending on the distribution). deej checks this on its first run and offers to add you to the right group for you - you'll just need to log out and back in afterwards.
+
+#### Flatpak
+
+When deej is packaged as a flatpak, the sandbox has its own user and group database that describes the runtime rather than your machine, so the permission check above is made on the host through `flatpak-spawn`. The manifest therefore needs:
+
+| Permission | Why |
+| --- | --- |
+| `--device=all` | see and open the Arduino's serial device |
+| `--share=network` | reach the configuration window on `localhost:8080` |
+| `--socket=session-bus` and `--talk-name=org.freedesktop.Flatpak` | run `getent`, `id`, `zenity` and `pkexec usermod` on the host via `flatpak-spawn --host` |
+
+Without the last one deej can still tell you that it has no access, but it can't name the host's group or fix the membership for you - it will fall back to showing you the `usermod` command to run yourself.
+
 ### Download and installation
 
 - Head over to the [releases page](https://github.com/omriharel/deej/releases) and download the [latest version](https://github.com/omriharel/deej/releases/latest)'s executable and configuration file (`deej.exe` and `config.yaml`)
