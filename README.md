@@ -179,14 +179,24 @@ With many different 3D-printed designs being added to our [community showcase](.
 
 #### Flatpak
 
-When deej is packaged as a flatpak, the sandbox has its own user and group database that describes the runtime rather than your machine, so the permission check above is made on the host through `flatpak-spawn`. The manifest therefore needs:
+A flatpak manifest lives in [`flatpak/`](./flatpak). Build and install a bundle with:
+
+```shell
+./flatpak/build.sh
+flatpak install --user flatpak/_build/deej.flatpak
+```
+
+The sandbox has its own user and group database that describes the runtime rather than your machine, and its user namespace maps only your own uid and gid - so `stat` on a serial device inside the sandbox reports the overflow group (`nobody`) instead of the real one. Both the device's owning group and your own membership are therefore looked up on the host through `flatpak-spawn`. The manifest needs:
 
 | Permission | Why |
 | --- | --- |
 | `--device=all` | see and open the Arduino's serial device |
-| `--socket=session-bus` and `--talk-name=org.freedesktop.Flatpak` | run `getent`, `id`, `zenity` and `pkexec usermod` on the host via `flatpak-spawn --host` |
+| `--socket=session-bus` and `--talk-name=org.freedesktop.Flatpak` | run `stat`, `getent`, `id`, `zenity` and `pkexec usermod` on the host via `flatpak-spawn --host` |
+| `--filesystem=host-etc:ro` | fall back to the host's `/etc/group` when `getent` isn't reachable |
+| `--socket=pulseaudio` and `--filesystem=xdg-config/pulse:ro` | control app volumes; the PulseAudio cookie is needed to authenticate |
+| `--filesystem=xdg-config/deej:create` | keep `config.yaml` and the logs at `~/.config/deej`, so the path is the same inside and outside the sandbox |
 
-Without the last one deej can still tell you that it has no access, but it can't name the host's group or fix the membership for you - it will fall back to showing you the `usermod` command to run yourself.
+Without `--talk-name=org.freedesktop.Flatpak` deej can still tell you that it has no access, but it can't name the host's group or fix the membership for you - it will say so in the log and fall back to a notification.
 
 ### Download and installation
 

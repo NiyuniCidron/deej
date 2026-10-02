@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.niyunicidron.deej</id>
+
+  <name>deej</name>
+  <summary>Control application volumes with physical sliders</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <description>
+    <p>
+      deej is an open-source hardware volume mixer. It pairs with an Arduino-based set of
+      physical sliders and maps each one to the applications you choose, so you can change
+      the volume of your music, your game and your voice chat without stopping what you're
+      doing.
+    </p>
+    <p>
+      Sliders are mapped in config.yaml, which lives in ~/.config/deej and can be opened
+      straight from deej's tray icon.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.niyunicidron.deej.desktop</launchable>
+
+  <url type="homepage">https://github.com/NiyuniCidron/deej</url>
+  <url type="bugtracker">https://github.com/NiyuniCidron/deej/issues</url>
+
+  <developer id="io.github.niyunicidron">
+    <name>NiyuniCidron</name>
+  </developer>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.0.0" date="2026-10-02">
+      <description>
+        <p>Test build.</p>
+      </description>
+    </release>
+  </releases>
+</component>

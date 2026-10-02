@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=deej
+GenericName=Hardware Volume Mixer
+Comment=Control application volumes with physical sliders
+Exec=deej
+Icon=io.github.niyunicidron.deej
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;
+Keywords=volume;mixer;audio;arduino;slider;
+StartupNotify=false

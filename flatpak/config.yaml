@@ -1,0 +1,29 @@
+# deej configuration
+#
+# This file is copied here on first run and is never overwritten afterwards, so edit away.
+# deej watches it and applies your changes immediately - no restart needed.
+
+# process names are case-insensitive, and you can map several to one slider
+# 'master' is the default output, 'mic' is the default input, and 'deej.unmapped' catches
+# every app that isn't bound to a slider of its own
+# slider indexes start at 0, regardless of which analog pins you're using
+slider_mapping:
+  0: master
+  1: mic
+  2: firefox
+  3:
+    - spotify
+    - mpv
+  4: deej.unmapped
+
+# set this to true if you want the controls inverted (i.e. top is 0%, bottom is 100%)
+invert_sliders: false
+
+# settings for connecting to the arduino board
+# 'auto' scans /dev/ttyUSB* and /dev/ttyACM* for a board speaking deej's protocol
+com_port: auto
+baud_rate: 9600
+
+# adjust the amount of signal noise reduction depending on your hardware quality
+# supported values are "low" (excellent hardware), "default" (regular hardware) or "high" (bad, noisy hardware)
+noise_reduction: default
