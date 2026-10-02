@@ -179,12 +179,14 @@ With many different 3D-printed designs being added to our [community showcase](.
 
 #### Flatpak
 
-A flatpak manifest lives in [`flatpak/`](./flatpak). Build and install a bundle with:
+Grab the `.flatpak` bundle from the [latest release](https://github.com/NiyuniCidron/deej/releases/latest) and install it with `flatpak install --user ./deej-*.flatpak`, or build your own from the manifest in [`flatpak/`](./flatpak):
 
 ```shell
 ./flatpak/build.sh
 flatpak install --user flatpak/_build/deej.flatpak
 ```
+
+Pushing a `v*` tag builds the same bundle in CI and attaches it to a release.
 
 The sandbox has its own user and group database that describes the runtime rather than your machine, and its user namespace maps only your own uid and gid - so `stat` on a serial device inside the sandbox reports the overflow group (`nobody`) instead of the real one. Both the device's owning group and your own membership are therefore looked up on the host through `flatpak-spawn`. The manifest needs:
 
