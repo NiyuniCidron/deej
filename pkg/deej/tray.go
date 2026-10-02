@@ -2,10 +2,14 @@ package deej
 
 import (
 	//"github.com/getlantern/systray"
+	"net/http"
 	"os"
 
 	"fyne.io/systray"
+	"go.uber.org/zap"
+
 	"github.com/omriharel/deej/pkg/deej/icon"
+	"github.com/omriharel/deej/pkg/deej/util"
 )
 
 // ThemeType represents the system theme
@@ -100,6 +104,9 @@ func (d *Deej) initializeTray(onDone func()) {
 		systray.SetTitle("deej")
 		systray.SetTooltip("deej")
 
+		settings := systray.AddMenuItem("Settings", "Open the settings window")
+		settings.SetIcon(icon.EditConfig)
+
 		editConfig := systray.AddMenuItem("Edit configuration", "Open config.yaml in your default editor")
 		editConfig.SetIcon(icon.EditConfig)
 
@@ -131,6 +138,10 @@ func (d *Deej) initializeTray(onDone func()) {
 					logger.Info("Quit menu item clicked, stopping")
 
 					d.signalStop()
+
+				case <-settings.ClickedCh:
+					logger.Info("Settings menu item clicked, opening settings window")
+					d.openSettingsWindow(logger)
 
 				// edit config
 				case <-editConfig.ClickedCh:
@@ -175,6 +186,35 @@ func (d *Deej) initializeTray(onDone func()) {
 	// start the tray icon
 	logger.Debug("Running in tray")
 	systray.Run(onReady, onExit)
+}
+
+// openSettingsWindow opens deej's settings UI in the default browser, starting the local
+// server on first use and keeping it running so Save doesn't tear the page down
+func (d *Deej) openSettingsWindow(logger *zap.SugaredLogger) {
+	d.webConfigMutex.Lock()
+
+	if d.webConfig == nil {
+		d.webConfig = NewWebConfigServer(d, logger)
+		server := d.webConfig
+
+		go func() {
+			if err := server.Start(); err != nil && err != http.ErrServerClosed {
+				logger.Errorw("Web config server error", "error", err)
+			}
+		}()
+	}
+
+	url := d.webConfig.URL()
+	d.webConfigMutex.Unlock()
+
+	browserCmd := "xdg-open"
+	if !util.Linux() {
+		browserCmd = "start"
+	}
+
+	if err := util.OpenExternal(logger, browserCmd, url); err != nil {
+		logger.Warnw("Failed to open settings window in browser", "error", err)
+	}
 }
 
 func (d *Deej) stopTray() {
