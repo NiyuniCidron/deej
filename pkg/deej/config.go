@@ -146,7 +146,10 @@ func (cc *CanonicalConfig) Load() error {
 
 // SubscribeToChanges allows external components to receive updates when the config is reloaded
 func (cc *CanonicalConfig) SubscribeToChanges() chan bool {
-	c := make(chan bool)
+
+	// buffered, so that a consumer that's busy handling the previous reload can't hold up
+	// the file watcher - or any of the other consumers - while it catches up
+	c := make(chan bool, 1)
 	cc.reloadConsumers = append(cc.reloadConsumers, c)
 
 	return c
@@ -241,6 +244,12 @@ func (cc *CanonicalConfig) onConfigReloaded() {
 	cc.logger.Debug("Notifying consumers about configuration reload")
 
 	for _, consumer := range cc.reloadConsumers {
-		consumer <- true
+		select {
+		case consumer <- true:
+		default:
+			// a reload is already pending for this consumer, which will pick up the same
+			// (latest) config values anyway - dropping this one keeps us from blocking
+			cc.logger.Debug("Consumer hasn't handled the previous reload yet, skipping it")
+		}
 	}
 }
