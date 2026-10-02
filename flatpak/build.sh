@@ -22,8 +22,14 @@ mkdir -p "$BUILD_DIR"
 echo "==> building deej"
 (
     cd "$ROOT"
+
+    GIT_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    VERSION_TAG="${DEEJ_VERSION_TAG:-$(git describe --tags --always 2>/dev/null || true)}"
+
+    echo "    gitCommit $GIT_COMMIT, versionTag ${VERSION_TAG:-<none>}"
+
     CGO_ENABLED=0 go build -trimpath \
-        -ldflags "-s -w -X main.gitCommit=$(git rev-parse --short HEAD 2>/dev/null || echo unknown) -X main.buildType=flatpak" \
+        -ldflags "-s -w -X main.gitCommit=$GIT_COMMIT -X main.versionTag=$VERSION_TAG -X main.buildType=flatpak" \
         -o "$BUILD_DIR/deej" .
 )
 

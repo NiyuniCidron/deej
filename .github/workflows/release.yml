@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+  # lets you rebuild the bundle without cutting a tag - the result is attached to the run
+  # instead of published, unless you dispatch it against a tag
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  flatpak:
+    name: Flatpak bundle
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # build.sh stamps the version with git describe, which needs the tags
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+
+      - name: Install the runtime
+        run: |
+          flatpak remote-add --if-not-exists --user flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive flathub \
+            org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+
+      - name: Build the bundle
+        env:
+          DEEJ_VERSION_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+        run: |
+          ./flatpak/build.sh
+          mv flatpak/_build/deej.flatpak "flatpak/_build/deej-${{ github.ref_name }}.flatpak"
+
+      - name: Upload the bundle to the run
+        uses: actions/upload-artifact@v4
+        with:
+          name: deej-flatpak
+          path: flatpak/_build/deej-*.flatpak
+
+      - name: Publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --title "deej ${{ github.ref_name }}" \
+            --notes-file .github/release-notes.md \
+            --generate-notes \
+            --prerelease \
+            flatpak/_build/deej-${{ github.ref_name }}.flatpak

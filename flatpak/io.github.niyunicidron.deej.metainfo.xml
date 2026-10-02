@@ -33,9 +33,14 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
-    <release version="0.0.0" date="2026-10-02">
+    <release version="0.10.0" date="2026-10-02">
       <description>
-        <p>Test build.</p>
+        <p>First flatpak release.</p>
+        <ul>
+          <li>The group that owns the serial device is now resolved on the host, so the
+              permission check names a group that actually exists on your machine.</li>
+          <li>Configuration and logs live in ~/.config/deej.</li>
+        </ul>
       </description>
     </release>
   </releases>
