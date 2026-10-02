@@ -57,16 +57,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          tag="${{ github.ref_name }}"
+          bundle="flatpak/_build/deej-$tag.flatpak"
+
+          # cutting the tag from the releases page creates the release before this runs,
+          # so attach the bundle to it rather than failing on a duplicate
+          if gh release view "$tag" >/dev/null 2>&1; then
+              gh release upload "$tag" "$bundle" --clobber
+              exit 0
+          fi
+
           # a semver prerelease suffix (v0.10.0-rc.1) publishes as a prerelease,
           # a plain version (v0.10.0) publishes as the latest release
-          case "${{ github.ref_name }}" in
+          case "$tag" in
               *-*) maturity=--prerelease ;;
               *)   maturity=--latest ;;
           esac
 
-          gh release create "${{ github.ref_name }}" \
-            --title "deej ${{ github.ref_name }}" \
+          gh release create "$tag" \
+            --title "deej $tag" \
             --notes-file .github/release-notes.md \
             --generate-notes \
             "$maturity" \
-            flatpak/_build/deej-${{ github.ref_name }}.flatpak
+            "$bundle"
