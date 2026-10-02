@@ -85,6 +85,35 @@ func TestMemberOfAnyWithNoMemberships(t *testing.T) {
 	}
 }
 
+func TestParseStatGroupOutput(t *testing.T) {
+	cases := []struct {
+		name         string
+		output       string
+		expectedGID  uint32
+		expectedName string
+		ok           bool
+	}{
+		{"gid and name", "20 dialout\n", 20, "dialout", true},
+		{"no trailing newline", "5 tty", 5, "tty", true},
+		// stat repeats the number instead of a name when the group is unknown to the host
+		{"unknown group", "1234 1234\n", 1234, "", true},
+		{"gid only", "46\n", 46, "", true},
+		{"empty", "\n", 0, "", false},
+		{"not a number", "oops nope\n", 0, "", false},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			gid, name, ok := parseStatGroupOutput(testCase.output)
+
+			if ok != testCase.ok || gid != testCase.expectedGID || name != testCase.expectedName {
+				t.Fatalf("expected (%d, %q, %v), got (%d, %q, %v)",
+					testCase.expectedGID, testCase.expectedName, testCase.ok, gid, name, ok)
+			}
+		})
+	}
+}
+
 func TestHostCommandRunsDirectlyOutsideFlatpak(t *testing.T) {
 	if inFlatpak() {
 		t.Skip("this test only describes the non-sandboxed case")

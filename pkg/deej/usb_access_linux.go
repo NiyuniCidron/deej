@@ -102,8 +102,11 @@ func (d *Deej) VerifyDeviceAccess() {
 
 	missing := []string{}
 	satisfied := []string{}
+	resolved := []string{}
 
 	for _, group := range groups {
+		resolved = append(resolved, strings.Join(group.names, "/"))
+
 		if member, name := memberOfAny(memberships, group.names); member {
 			satisfied = append(satisfied, name)
 			continue
@@ -115,7 +118,7 @@ func (d *Deej) VerifyDeviceAccess() {
 
 	logger.Infow("Resolved group ownership of inaccessible serial devices",
 		"user", username,
-		"groups", groups,
+		"groups", resolved,
 		"alreadyMember", satisfied,
 		"missing", missing)
 
@@ -177,33 +180,124 @@ func resolveDeviceGroups(logger *zap.SugaredLogger, devices []string) []deviceGr
 	seen := map[uint32]bool{}
 
 	for _, device := range devices {
-		info, err := os.Stat(device)
-		if err != nil {
-			logger.Warnw("Failed to stat serial device", "device", device, "error", err)
-			continue
-		}
-
-		stat, ok := info.Sys().(*syscall.Stat_t)
+		gid, nameFromStat, ok := deviceOwningGID(logger, device)
 		if !ok {
-			logger.Warnw("Serial device has no unix stat information", "device", device)
 			continue
 		}
 
-		if seen[stat.Gid] {
+		if seen[gid] {
 			continue
 		}
-		seen[stat.Gid] = true
+		seen[gid] = true
 
-		names := groupNamesForGID(logger, stat.Gid)
+		names := groupNamesForGID(logger, gid)
+		if len(names) == 0 && nameFromStat != "" {
+			names = []string{nameFromStat}
+		}
+
 		if len(names) == 0 {
-			logger.Warnw("No group name found for serial device owner", "device", device, "gid", stat.Gid)
+			logger.Warnw("No group name found for serial device owner", "device", device, "gid", gid)
 			continue
 		}
 
-		groups = append(groups, deviceGroup{gid: stat.Gid, names: names})
+		groups = append(groups, deviceGroup{gid: gid, names: names})
 	}
 
 	return groups
+}
+
+// deviceOwningGID returns the gid owning the given device, along with the group name the
+// host knows it by when we had to ask the host for it.
+//
+// A flatpak's user namespace maps our own uid and gid and nothing else, so stat(2) inside
+// the sandbox reports the overflow gid (nobody) for every device we don't own. The number
+// is meaningless there, and acting on it would offer to add the user to 'nogroup'.
+func deviceOwningGID(logger *zap.SugaredLogger, device string) (uint32, string, bool) {
+	if inFlatpak() {
+		gid, name, ok := hostDeviceOwningGroup(device)
+		if !ok {
+			logger.Warnw("Couldn't ask the host which group owns this device, and the sandbox's "+
+				"own answer can't be trusted - is --talk-name=org.freedesktop.Flatpak missing?",
+				"device", device)
+
+			return 0, "", false
+		}
+
+		logger.Debugw("Host reports device ownership", "device", device, "gid", gid, "group", name)
+
+		return gid, name, true
+	}
+
+	info, err := os.Stat(device)
+	if err != nil {
+		logger.Warnw("Failed to stat serial device", "device", device, "error", err)
+		return 0, "", false
+	}
+
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		logger.Warnw("Serial device has no unix stat information", "device", device)
+		return 0, "", false
+	}
+
+	if stat.Gid == overflowGID(logger) {
+		logger.Warnw("Serial device is owned by the overflow group, refusing to act on it",
+			"device", device, "gid", stat.Gid)
+
+		return 0, "", false
+	}
+
+	return stat.Gid, "", true
+}
+
+// hostDeviceOwningGroup asks the host for a device's owning gid and group name
+func hostDeviceOwningGroup(device string) (uint32, string, bool) {
+	output, err := hostCommand("stat", "-c", "%g %G", device).Output()
+	if err != nil {
+		return 0, "", false
+	}
+
+	return parseStatGroupOutput(string(output))
+}
+
+// parseStatGroupOutput reads `stat -c "%g %G"` output. stat repeats the number in place of
+// the name when the host's group database has no entry for it.
+func parseStatGroupOutput(output string) (uint32, string, bool) {
+	fields := strings.Fields(output)
+	if len(fields) < 1 {
+		return 0, "", false
+	}
+
+	gid, err := strconv.ParseUint(fields[0], 10, 32)
+	if err != nil {
+		return 0, "", false
+	}
+
+	name := ""
+	if len(fields) > 1 && fields[1] != fields[0] {
+		name = fields[1]
+	}
+
+	return uint32(gid), name, true
+}
+
+// overflowGID is the gid the kernel reports for groups that aren't mapped into our user
+// namespace - 65534 unless this machine says otherwise
+func overflowGID(logger *zap.SugaredLogger) uint32 {
+	const defaultOverflowGID = 65534
+
+	contents, err := os.ReadFile("/proc/sys/kernel/overflowgid")
+	if err != nil {
+		return defaultOverflowGID
+	}
+
+	gid, err := strconv.ParseUint(strings.TrimSpace(string(contents)), 10, 32)
+	if err != nil {
+		logger.Debugw("Couldn't parse the kernel's overflow gid, assuming the default", "error", err)
+		return defaultOverflowGID
+	}
+
+	return uint32(gid)
 }
 
 // groupNamesForGID resolves a gid to its group name(s). The sandbox's own group database
