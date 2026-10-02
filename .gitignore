@@ -12,3 +12,5 @@ releases/
 *.bin
 logs/
 preferences.yaml
+.flatpak-builder/
+flatpak/_build/

@@ -1,0 +1,62 @@
+app-id: io.github.niyunicidron.deej
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: deej
+
+finish-args:
+  # the Arduino shows up as /dev/ttyUSB* or /dev/ttyACM*
+  - --device=all
+
+  # reading and setting per-application volumes
+  - --socket=pulseaudio
+
+  # deej speaks the PulseAudio protocol directly and authenticates with the cookie rather
+  # than with socket credentials, so it needs to be able to read it. PipeWire doesn't care,
+  # but a classic PulseAudio server refuses the connection without it.
+  - --filesystem=xdg-config/pulse:ro
+
+  # the tray icon (StatusNotifierItem), desktop notifications and MPRIS metadata are all
+  # D-Bus, as is the Flatpak portal below
+  - --socket=session-bus
+
+  # deej asks the host - not the runtime - which group owns the serial device, and runs
+  # pkexec usermod there if you accept its offer to fix your membership. This is also how
+  # "Edit configuration" reaches a text editor, since the runtime doesn't ship one.
+  - --talk-name=org.freedesktop.Flatpak
+
+  # fallback for the group lookup when the portal above isn't available: the host's group
+  # database shows up at /run/host/etc/group
+  - --filesystem=host-etc:ro
+
+  # config.yaml and logs/ live here, at the same path inside and outside the sandbox so
+  # that a host editor can open the very file deej is watching
+  - --filesystem=xdg-config/deej:create
+
+modules:
+  - name: deej
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 deej /app/bin/deej-bin
+      - install -Dm755 deej-launcher.sh /app/bin/deej
+      - install -Dm644 config.yaml -t /app/share/deej/
+      - install -Dm644 io.github.niyunicidron.deej.desktop -t /app/share/applications/
+      - install -Dm644 io.github.niyunicidron.deej.metainfo.xml -t /app/share/metainfo/
+      # png only - appstreamcli 1.0.x, which flatpak-builder shells out to, can't read svg
+      # icons without librsvg's pixbuf loader and fails the whole build when it finds one
+      - install -Dm644 logo-512.png /app/share/icons/hicolor/512x512/apps/io.github.niyunicidron.deej.png
+    sources:
+      # produced by flatpak/build.sh - a CGO-free static binary, so it doesn't care which
+      # runtime it ends up in
+      - type: file
+        path: _build/deej
+      - type: file
+        path: deej-launcher.sh
+      - type: file
+        path: io.github.niyunicidron.deej.desktop
+      - type: file
+        path: io.github.niyunicidron.deej.metainfo.xml
+      - type: file
+        path: config.yaml
+      - type: file
+        path: ../assets/logo-512.png

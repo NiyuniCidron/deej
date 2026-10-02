@@ -175,6 +175,31 @@ With many different 3D-printed designs being added to our [community showcase](.
 
 ~~- Install `libgtk-3-dev`, `libappindicator3-dev` and `libwebkit2gtk-4.0-dev` for system tray support. Pre-built Linux binaries aren't currently released, so you'll need to [build from source](#building-from-source). If there's demand for pre-built binaries, please [let me know](https://discord.gg/nf88NJu)!~~
 
+- Your user needs to be a member of the group that owns the serial device (commonly `dialout`, `uucp` or `plugdev`, depending on the distribution). deej checks this on its first run and offers to add you to the right group for you - you'll just need to log out and back in afterwards.
+
+#### Flatpak
+
+Grab the `.flatpak` bundle from the [latest release](https://github.com/NiyuniCidron/deej/releases/latest) and install it with `flatpak install --user ./deej-*.flatpak`, or build your own from the manifest in [`flatpak/`](./flatpak):
+
+```shell
+./flatpak/build.sh
+flatpak install --user flatpak/_build/deej.flatpak
+```
+
+Pushing a `v*` tag builds the same bundle in CI and attaches it to a release.
+
+The sandbox has its own user and group database that describes the runtime rather than your machine, and its user namespace maps only your own uid and gid - so `stat` on a serial device inside the sandbox reports the overflow group (`nobody`) instead of the real one. Both the device's owning group and your own membership are therefore looked up on the host through `flatpak-spawn`. The manifest needs:
+
+| Permission | Why |
+| --- | --- |
+| `--device=all` | see and open the Arduino's serial device |
+| `--socket=session-bus` and `--talk-name=org.freedesktop.Flatpak` | run `stat`, `getent`, `id`, `zenity` and `pkexec usermod` on the host via `flatpak-spawn --host` |
+| `--filesystem=host-etc:ro` | fall back to the host's `/etc/group` when `getent` isn't reachable |
+| `--socket=pulseaudio` and `--filesystem=xdg-config/pulse:ro` | control app volumes; the PulseAudio cookie is needed to authenticate |
+| `--filesystem=xdg-config/deej:create` | keep `config.yaml` and the logs at `~/.config/deej`, so the path is the same inside and outside the sandbox |
+
+Without `--talk-name=org.freedesktop.Flatpak` deej can still tell you that it has no access, but it can't name the host's group or fix the membership for you - it will say so in the log and fall back to a notification.
+
 ### Download and installation
 
 - Head over to the [releases page](https://github.com/omriharel/deej/releases) and download the [latest version](https://github.com/omriharel/deej/releases/latest)'s executable and configuration file (`deej.exe` and `config.yaml`)
