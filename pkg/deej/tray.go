@@ -7,7 +7,6 @@ import (
 	"fyne.io/systray"
 
 	"github.com/omriharel/deej/pkg/deej/icon"
-	"github.com/omriharel/deej/pkg/deej/util"
 )
 
 // ThemeType represents the system theme
@@ -138,12 +137,7 @@ func (d *Deej) initializeTray(onDone func()) {
 				case <-editConfig.ClickedCh:
 					logger.Info("Edit config menu item clicked, opening config for editing")
 
-					editor := "notepad.exe"
-					if util.Linux() {
-						editor = "gedit"
-					}
-
-					if err := util.OpenExternal(logger, editor, userConfigFilepath); err != nil {
+					if err := d.openConfigFile(logger); err != nil {
 						logger.Warnw("Failed to open config file for editing", "error", err)
 					}
 
